@@ -1,0 +1,39 @@
+import Link from "next/link";
+import { AppShell } from "@/components/app-shell";
+import { formatCents } from "@/lib/money";
+import { prisma } from "@/lib/prisma";
+import { allocatedAmount, monthSelection, shiftMonth } from "@/lib/receivables";
+
+export const dynamic = "force-dynamic";
+
+export default async function Home({ searchParams }: { searchParams: Promise<{ mes?: string; personId?: string }> }) {
+  const filters = await searchParams;
+  const period = monthSelection(filters.mes);
+  const [people, invoices, transactions, payments, projected] = await Promise.all([
+    prisma.person.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" } }),
+    prisma.invoice.findMany({ where: { referenceMonth: { gte: period.start, lt: period.end } }, include: { card: true, transactions: { where: { status: { not: "VOID" } }, select: { amountCents: true, personId: true, shares: true } } }, orderBy: { dueDate: "asc" } }),
+    prisma.transaction.findMany({ where: { status: { not: "VOID" }, OR: [{ billingYear: period.year, billingMonth: period.month }, { billingYear: null, invoice: { referenceMonth: { gte: period.start, lt: period.end } } }, { billingYear: null, invoiceId: null, occurredAt: { gte: period.start, lt: period.end } }] }, include: { shares: true, category: true } }),
+    prisma.payment.findMany({ where: { paidAt: { gte: period.start, lt: period.end }, ...(filters.personId ? { personId: filters.personId } : {}) } }),
+    prisma.installment.findMany({ where: { status: { in: ["PROJECTED", "DIVERGENT"] }, billingYear: period.year, billingMonth: period.month, ...(filters.personId ? { plan: { personId: filters.personId } } : {}) }, select: { amountCents: true } }),
+  ]);
+  const visibleTransactions = filters.personId ? transactions.filter(item => allocatedAmount(item, filters.personId!) !== 0) : transactions;
+  const itemValue = (item: typeof transactions[number]) => filters.personId ? allocatedAmount(item, filters.personId) : item.amountCents;
+  const total = visibleTransactions.reduce((sum, item) => sum + itemValue(item), 0);
+  const receivableByPerson = people.map(person => ({ person, value: transactions.reduce((sum, item) => sum + allocatedAmount(item, person.id), 0) - payments.filter(payment => payment.personId === person.id).reduce((sum, payment) => sum + payment.amountCents, 0) })).filter(item => item.value !== 0).sort((a, b) => b.value - a.value);
+  const receivable = filters.personId ? receivableByPerson.find(item => item.person.id === filters.personId)?.value ?? 0 : receivableByPerson.reduce((sum, item) => sum + item.value, 0);
+  const categoryTotals = new Map<string, number>();
+  for (const item of visibleTransactions) categoryTotals.set(item.category?.name || "Sem categoria", (categoryTotals.get(item.category?.name || "Sem categoria") ?? 0) + itemValue(item));
+  const topCategories = [...categoryTotals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const projectedTotal = projected.reduce((sum, item) => sum + item.amountCents, 0);
+  const received = payments.reduce((sum, item) => sum + item.amountCents, 0);
+  const monthLabel = period.start.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+  const monthUrl = (value: string) => `/?mes=${value}${filters.personId ? `&personId=${filters.personId}` : ""}`;
+  return <AppShell><section className="content" id="inicio"><header className="topbar"><div><p className="eyebrow">VISÃO FINANCEIRA</p><h1>Dashboard de {monthLabel}</h1><p className="intro">Faturas, valores por pessoa e compromissos da competência.</p></div><Link className="primary button-link" href="/importar">Importar fatura</Link></header>
+    <section className="month-switcher panel"><Link href={monthUrl(shiftMonth(period.selected, -1))}>‹</Link><div><span>COMPETÊNCIA</span><strong>{monthLabel}</strong><small>{filters.personId ? "Visão filtrada por pessoa" : "Visão geral"}</small></div><Link href={monthUrl(shiftMonth(period.selected, 1))}>›</Link></section>
+    <form className="panel dashboard-filter"><input type="hidden" name="mes" value={period.selected} /><label>Pessoa<select name="personId" defaultValue={filters.personId ?? ""}><option value="">Todas as pessoas</option>{people.map(person => <option key={person.id} value={person.id}>{person.nickname || person.name}</option>)}</select></label><button className="secondary-button" type="submit">Aplicar filtro</button>{filters.personId && <Link className="secondary-link" href={`/?mes=${period.selected}`}>Ver todos</Link>}</form>
+    <div className="summary-grid"><article className="summary-card"><p>Total da competência</p><strong>{formatCents(total)}</strong><span>{visibleTransactions.length} lançamento(s)</span></article><article className="summary-card"><p>A receber</p><strong>{formatCents(receivable)}</strong><span>Após pagamentos do mês</span></article><article className="summary-card"><p>Recebido</p><strong>{formatCents(received)}</strong><span>Pagamentos registrados</span></article><article className="summary-card"><p>Previsto</p><strong>{formatCents(projectedTotal)}</strong><span>Parcelas ainda não confirmadas</span></article></div>
+    <div className="dashboard-grid"><section className="panel invoice-overview"><div className="panel-heading"><div><p className="eyebrow">FATURAS DO MÊS</p><h2>Cartões e fechamentos</h2></div><Link className="secondary-link" href={`/faturas-a-vencer?mes=${period.selected}`}>Ver todas →</Link></div>{invoices.length ? <div className="invoice-cards">{invoices.map(invoice => { const invoiceTotal = filters.personId ? invoice.transactions.reduce((sum, item) => sum + allocatedAmount(item, filters.personId!), 0) : invoice.transactions.reduce((sum, item) => sum + item.amountCents, 0); return invoiceTotal !== 0 ? <Link href={`/faturas-a-vencer/${invoice.cardId}?mes=${period.selected}`} className="invoice-card" key={invoice.id}><span className="card-color" style={{ background: invoice.card.color || "#74cabb" }} /><div><strong>{invoice.card.name}</strong><small>Final {invoice.card.lastFour}</small></div><b>{formatCents(invoiceTotal)}</b><span className="invoice-state">Vencimento {invoice.dueDate?.toLocaleDateString("pt-BR") || "a definir"}</span></Link> : null; })}</div> : <div className="empty-state compact"><strong>Nenhuma fatura nesta competência</strong><span>Importe uma fatura para montar o fechamento.</span></div>}</section>
+      <section className="panel dashboard-ranking"><div className="panel-heading"><div><p className="eyebrow">A RECEBER</p><h2>Saldo por pessoa</h2></div><Link className="secondary-link" href={`/receber?mes=${period.selected}`}>Detalhar →</Link></div>{receivableByPerson.length ? <div>{receivableByPerson.slice(0, 6).map(item => <Link key={item.person.id} href={`/receber?mes=${period.selected}&personId=${item.person.id}`}><span className="avatar">{item.person.name[0]}</span><strong>{item.person.nickname || item.person.name}</strong><b>{formatCents(item.value)}</b></Link>)}</div> : <div className="empty-state compact"><strong>Nenhum saldo pendente</strong><span>Não existem valores atribuídos nesta competência.</span></div>}</section>
+      <section className="panel dashboard-categories"><div className="panel-heading"><div><p className="eyebrow">DISTRIBUIÇÃO</p><h2>Maiores categorias</h2></div></div>{topCategories.length ? <div>{topCategories.map(([name, value]) => { const percentage = total ? Math.max(3, Math.round(value / total * 100)) : 0; return <article key={name}><span><strong>{name}</strong><b>{formatCents(value)}</b></span><i><em style={{ width: `${Math.min(100, percentage)}%` }} /></i></article>; })}</div> : <div className="empty-state compact"><strong>Sem dados de categoria</strong></div>}</section>
+    </div></section></AppShell>;
+}

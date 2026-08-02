@@ -1,0 +1,313 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma-v9"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum PersonStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum CardStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum TransactionStatus {
+  PENDING
+  CONFIRMED
+  PROJECTED
+  VOID
+}
+
+enum TransactionOrigin {
+  MANUAL
+  IMPORT
+}
+
+enum TransactionType {
+  EXPENSE
+  REFUND
+}
+
+enum InstallmentStatus {
+  PROJECTED
+  CONFIRMED
+  DIVERGENT
+  CANCELLED
+}
+
+enum PaymentMethod {
+  PIX
+  CASH
+  TRANSFER
+  CARD
+  OTHER
+}
+
+enum ImportFormat {
+  CSV
+  XLSX
+}
+
+enum ImportStatus {
+  REVIEW
+  CONFIRMED
+  CANCELLED
+}
+
+enum ImportRowStatus {
+  NEW
+  POSSIBLE_DUPLICATE
+  NEEDS_REVIEW
+  IMPORTED
+  SKIPPED
+}
+
+model Person {
+  id           String       @id @default(cuid())
+  name         String
+  nickname     String?
+  relationship String?
+  status       PersonStatus @default(ACTIVE)
+  notes        String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  cards        Card[]       @relation("CardHolder")
+  transactions Transaction[]
+  shares       TransactionShare[]
+  installmentPlans InstallmentPlan[]
+  payments     Payment[]
+  merchantRules MerchantRule[]
+}
+
+model Bank {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  cards     Card[]
+}
+
+model Card {
+  id          String     @id @default(cuid())
+  name        String
+  brand       String?
+  lastFour    String
+  closingDay  Int
+  dueDay      Int
+  limitCents  Int?
+  color       String?
+  status      CardStatus @default(ACTIVE)
+  bankId      String
+  holderId    String
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  bank        Bank       @relation(fields: [bankId], references: [id])
+  holder      Person     @relation("CardHolder", fields: [holderId], references: [id])
+  statements  Statement[]
+  transactions Transaction[]
+  imports      ImportBatch[]
+  invoices     Invoice[]
+  installmentPlans InstallmentPlan[]
+
+  @@unique([bankId, lastFour])
+}
+
+model Invoice {
+  id             String        @id @default(cuid())
+  cardId         String
+  referenceMonth DateTime
+  dueDate        DateTime?
+  totalCents     Int?
+  createdAt      DateTime      @default(now())
+  card           Card          @relation(fields: [cardId], references: [id])
+  imports        ImportBatch[]
+  transactions   Transaction[]
+
+  @@unique([cardId, referenceMonth])
+}
+
+model ImportBatch {
+  id          String       @id @default(cuid())
+  fileName    String
+  format      ImportFormat
+  sourceHash  String
+  status      ImportStatus @default(REVIEW)
+  mappingRequired Boolean  @default(false)
+  cardId      String
+  invoiceId   String?
+  createdAt   DateTime     @default(now())
+  confirmedAt DateTime?
+  card        Card         @relation(fields: [cardId], references: [id])
+  invoice     Invoice?     @relation(fields: [invoiceId], references: [id])
+  rows        ImportRow[]
+
+  @@unique([cardId, sourceHash])
+}
+
+model ImportRow {
+  id              String          @id @default(cuid())
+  batchId         String
+  sourceLine      Int
+  rawData         String
+  occurredAt      DateTime?
+  description     String?
+  amountCents     Int?
+  installmentNo   Int?
+  installmentTotal Int?
+  status          ImportRowStatus @default(NEEDS_REVIEW)
+  duplicateOfId   String?
+  transactionId   String?         @unique
+  createdAt       DateTime        @default(now())
+  batch           ImportBatch     @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@unique([batchId, sourceLine])
+}
+
+model Category {
+  id        String     @id @default(cuid())
+  name      String
+  color     String?
+  active    Boolean    @default(true)
+  parentId  String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children  Category[] @relation("CategoryTree")
+  transactions Transaction[]
+  installmentPlans InstallmentPlan[]
+  merchantRules MerchantRule[]
+
+  @@unique([name, parentId])
+}
+
+model MerchantRule {
+  id          String   @id @default(cuid())
+  pattern     String
+  categoryId  String?
+  personId    String?
+  priority    Int      @default(100)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  category    Category? @relation(fields: [categoryId], references: [id])
+  person      Person?   @relation(fields: [personId], references: [id])
+
+  @@index([active, priority])
+}
+
+model Statement {
+  id          String        @id @default(cuid())
+  cardId      String
+  reference   DateTime
+  dueDate     DateTime?
+  totalCents  Int?
+  createdAt   DateTime      @default(now())
+  card        Card          @relation(fields: [cardId], references: [id])
+  transactions Transaction[]
+
+  @@unique([cardId, reference])
+}
+
+model Transaction {
+  id              String            @id @default(cuid())
+  occurredAt      DateTime
+  description     String
+  merchantOriginal String?
+  merchantNormalized String?
+  amountCents     Int
+  type            TransactionType  @default(EXPENSE)
+  status          TransactionStatus @default(PENDING)
+  origin          TransactionOrigin @default(MANUAL)
+  notes           String?
+  cardId          String?
+  statementId     String?
+  invoiceId       String?
+  personId        String?
+  categoryId      String?
+  billingMonth    Int?
+  billingYear     Int?
+  billingReference String?
+  estimatedDueDate DateTime?
+  installmentPlanId String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  card            Card?             @relation(fields: [cardId], references: [id])
+  statement       Statement?        @relation(fields: [statementId], references: [id])
+  invoice         Invoice?          @relation(fields: [invoiceId], references: [id])
+  person          Person?           @relation(fields: [personId], references: [id])
+  category        Category?         @relation(fields: [categoryId], references: [id])
+  installmentPlan InstallmentPlan?  @relation(fields: [installmentPlanId], references: [id])
+  shares          TransactionShare[]
+  installment     Installment?
+}
+
+model TransactionShare {
+  id            String      @id @default(cuid())
+  transactionId String
+  personId      String
+  percentageBps Int
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  person        Person      @relation(fields: [personId], references: [id])
+
+  @@unique([transactionId, personId])
+}
+
+model InstallmentPlan {
+  id          String        @id @default(cuid())
+  description String
+  totalCents  Int
+  installmentCents Int
+  totalInstallments Int
+  startDate   DateTime
+  endDate     DateTime
+  cardId      String
+  merchantNormalized String?
+  personId    String?
+  categoryId  String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  transactions Transaction[]
+  installments Installment[]
+  card        Card          @relation(fields: [cardId], references: [id])
+  person      Person?       @relation(fields: [personId], references: [id])
+  category    Category?     @relation(fields: [categoryId], references: [id])
+}
+
+model Installment {
+  id          String            @id @default(cuid())
+  planId      String
+  sequence    Int
+  dueMonth    DateTime
+  amountCents Int
+  status      InstallmentStatus @default(PROJECTED)
+  transactionId String?         @unique
+  purchaseDate DateTime?
+  billingMonth Int?
+  billingYear Int?
+  billingReference String?
+  estimatedDueDate DateTime?
+  source String @default("IMPORT")
+  expectedAmountCents Int?
+  actualAmountCents Int?
+  plan        InstallmentPlan   @relation(fields: [planId], references: [id])
+  transaction Transaction?      @relation(fields: [transactionId], references: [id])
+
+  @@unique([planId, sequence])
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  personId    String
+  paidAt      DateTime
+  amountCents Int
+  method      PaymentMethod
+  notes       String?
+  createdAt   DateTime      @default(now())
+  person      Person        @relation(fields: [personId], references: [id])
+}
