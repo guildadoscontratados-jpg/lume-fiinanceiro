@@ -2,6 +2,25 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@/generated/prisma-v9";
+
+function parsedDate(value: string) {
+  const match = value.match(/^(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/);
+  if (!match) throw new Error("Informe um vencimento válido.");
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12));
+  if (date.getUTCFullYear() !== Number(match[1]) || date.getUTCMonth() !== Number(match[2]) - 1 || date.getUTCDate() !== Number(match[3])) throw new Error("Informe um vencimento válido.");
+  return date;
+}
+
+async function setDueDate(tx: Prisma.TransactionClient, cardId: string, ids: string[], dueDate: Date) {
+  const referenceMonth = new Date(Date.UTC(dueDate.getUTCFullYear(), dueDate.getUTCMonth(), 1, 12));
+  const billingMonth = dueDate.getUTCMonth() + 1;
+  const billingYear = dueDate.getUTCFullYear();
+  const billingReference = `${String(billingMonth).padStart(2, "0")}/${billingYear}`;
+  const invoice = await tx.invoice.upsert({ where: { cardId_referenceMonth: { cardId, referenceMonth } }, update: { dueDate }, create: { cardId, referenceMonth, dueDate } });
+  await tx.transaction.updateMany({ where: { id: { in: ids }, cardId }, data: { invoiceId: invoice.id, billingMonth, billingYear, billingReference, estimatedDueDate: dueDate } });
+  await tx.installment.updateMany({ where: { transactionId: { in: ids } }, data: { dueMonth: referenceMonth, billingMonth, billingYear, billingReference, estimatedDueDate: dueDate } });
+}
 
 function percentage(value: FormDataEntryValue | null) {
   const parsed = Math.round(Number(String(value ?? "").trim().replace(",", ".")) * 100);
@@ -35,6 +54,15 @@ export async function bulkClassifyDueItems(cardId: string, formData: FormData) {
       prisma.transactionShare.deleteMany({ where: { transactionId: { in: validIds } } }),
       prisma.transaction.updateMany({ where: { id: { in: validIds } }, data: { personId } }),
     ]);
+  } else if (action === "DUE_MONTH") {
+    const monthText = String(formData.get("dueMonth") ?? "");
+    if (!/^(20\d{2})-(0[1-9]|1[0-2])$/.test(monthText)) throw new Error("Escolha o mês e o ano do vencimento.");
+    const [year, month] = monthText.split("-").map(Number);
+    const card = await prisma.card.findUnique({ where: { id: cardId }, select: { dueDay: true } });
+    if (!card) throw new Error("Cartão não encontrado.");
+    const lastDay = new Date(Date.UTC(year, month, 0, 12)).getUTCDate();
+    const dueDate = new Date(Date.UTC(year, month - 1, Math.min(Math.max(1, card.dueDay), lastDay), 12));
+    await prisma.$transaction(tx => setDueDate(tx, cardId, validIds, dueDate));
   } else throw new Error("Escolha a alteração que deseja aplicar.");
 
   revalidatePath(`/faturas-a-vencer/${cardId}`);
@@ -76,7 +104,7 @@ export async function updateDueItemField(cardId: string, formData: FormData) {
   const field = String(formData.get("field") ?? "");
   const value = String(formData.get("value") ?? "");
   const scope = String(formData.get("scope") ?? "ONLY_THIS");
-  if (!value || !["categoryId", "personId"].includes(field)) throw new Error("Alteração inválida.");
+  if (!value || !["categoryId", "personId", "dueDate"].includes(field)) throw new Error("Alteração inválida.");
   const transaction = await prisma.transaction.findFirst({ where: { id: transactionId, cardId }, select: { id: true, installmentPlanId: true } });
   if (!transaction) throw new Error("Lançamento não encontrado.");
   if (field === "categoryId" && !await prisma.category.findFirst({ where: { id: value, active: true } })) throw new Error("Categoria indisponível.");
@@ -85,7 +113,8 @@ export async function updateDueItemField(cardId: string, formData: FormData) {
     const ids = scope === "ALL" && transaction.installmentPlanId
       ? (await tx.transaction.findMany({ where: { installmentPlanId: transaction.installmentPlanId }, select: { id: true } })).map(item => item.id)
       : [transactionId];
-    await tx.transaction.updateMany({ where: { id: { in: ids } }, data: field === "categoryId" ? { categoryId: value } : { personId: value } });
+    if (field === "dueDate") await setDueDate(tx, cardId, [transactionId], parsedDate(value));
+    else await tx.transaction.updateMany({ where: { id: { in: ids } }, data: field === "categoryId" ? { categoryId: value } : { personId: value } });
     if (field === "personId") await tx.transactionShare.deleteMany({ where: { transactionId: { in: ids } } });
     if (scope === "ALL" && transaction.installmentPlanId) await tx.installmentPlan.update({ where: { id: transaction.installmentPlanId }, data: field === "categoryId" ? { categoryId: value } : { personId: value } });
   });

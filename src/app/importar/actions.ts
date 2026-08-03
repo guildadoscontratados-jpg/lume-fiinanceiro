@@ -137,5 +137,5 @@ export async function confirmImport(batchId: string, formData: FormData) {
     },
   );
   if (batch.invoiceId) { const totals = await prisma.transaction.aggregate({ where: { invoiceId: batch.invoiceId, status: { not: "VOID" } }, _sum: { amountCents: true } }); await prisma.invoice.update({ where: { id: batch.invoiceId }, data: { totalCents: totals._sum.amountCents ?? 0 } }); }
-  revalidatePath("/"); revalidatePath("/faturas"); revalidatePath("/lancamentos"); revalidatePath("/parcelamentos"); revalidatePath(`/importar/${batchId}`); redirect("/lancamentos");
+  revalidatePath("/"); revalidatePath("/faturas"); revalidatePath("/lancamentos"); revalidatePath("/parcelamentos"); revalidatePath(`/importar/${batchId}`); redirect("/");
 }
