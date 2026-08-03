@@ -15,6 +15,14 @@ function parseDueDate(value: FormDataEntryValue | null) {
   return date;
 }
 
+function parseDueMonth(value: FormDataEntryValue | null) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  const match = text.match(/^(20\d{2})-(0[1-9]|1[0-2])$/);
+  if (!match) throw new Error("Informe um mês e ano de vencimento válidos.");
+  return { year: Number(match[1]), month: Number(match[2]) };
+}
+
 async function applyDueDate(tx: Prisma.TransactionClient, transactionIds: string[], dueDate: Date) {
   const transactions = await tx.transaction.findMany({ where: { id: { in: transactionIds } }, select: { id: true, cardId: true } });
   if (transactions.length !== transactionIds.length || transactions.some(item => !item.cardId)) throw new Error("O vencimento só pode ser alterado em lançamentos vinculados a um cartão.");
@@ -27,6 +35,18 @@ async function applyDueDate(tx: Prisma.TransactionClient, transactionIds: string
     const ids = transactions.filter(item => item.cardId === cardId).map(item => item.id);
     await tx.transaction.updateMany({ where: { id: { in: ids } }, data: { invoiceId: invoice.id, billingMonth, billingYear, billingReference, estimatedDueDate: dueDate } });
     await tx.installment.updateMany({ where: { transactionId: { in: ids } }, data: { dueMonth: referenceMonth, billingMonth, billingYear, billingReference, estimatedDueDate: dueDate } });
+  }
+}
+
+async function applyDueMonth(tx: Prisma.TransactionClient, transactionIds: string[], dueMonth: { year: number; month: number }) {
+  const transactions = await tx.transaction.findMany({ where: { id: { in: transactionIds } }, select: { id: true, cardId: true } });
+  if (transactions.length !== transactionIds.length || transactions.some(item => !item.cardId)) throw new Error("O vencimento só pode ser alterado em lançamentos vinculados a um cartão.");
+  const cards = await tx.card.findMany({ where: { id: { in: [...new Set(transactions.map(item => item.cardId!))] } }, select: { id: true, dueDay: true } });
+  const lastDay = new Date(Date.UTC(dueMonth.year, dueMonth.month, 0, 12)).getUTCDate();
+  for (const card of cards) {
+    const ids = transactions.filter(item => item.cardId === card.id).map(item => item.id);
+    const dueDate = new Date(Date.UTC(dueMonth.year, dueMonth.month - 1, Math.min(Math.max(1, card.dueDay), lastDay), 12));
+    await applyDueDate(tx, ids, dueDate);
   }
 }
 
@@ -83,14 +103,14 @@ export async function bulkUpdateTransactions(formData: FormData) {
   const category = String(formData.get("bulkCategory") ?? "");
   const status = String(formData.get("bulkStatus") ?? "");
   const notes = String(formData.get("bulkNotes") ?? "").trim();
-  const dueDate = parseDueDate(formData.get("bulkDueDate"));
+  const dueMonth = parseDueMonth(formData.get("bulkDueMonth"));
   const data: Record<string, unknown> = {};
   if (person === "__none__" || person) data.personId = person === "__none__" ? null : person;
   if (category === "__none__" || category) data.categoryId = category === "__none__" ? null : category;
   if (["PENDING", "CONFIRMED", "PROJECTED", "VOID"].includes(status)) data.status = status;
   if (notes) data.notes = notes;
-  if (!Object.keys(data).length && !dueDate) throw new Error("Escolha uma alteração para aplicar.");
-  await prisma.$transaction(async tx => { if (Object.keys(data).length) await tx.transaction.updateMany({ where: { id: { in: ids } }, data }); if (dueDate) await applyDueDate(tx, ids, dueDate); if (person) await tx.transactionShare.deleteMany({ where: { transactionId: { in: ids } } }); });
+  if (!Object.keys(data).length && !dueMonth) throw new Error("Escolha uma alteração para aplicar.");
+  await prisma.$transaction(async tx => { if (Object.keys(data).length) await tx.transaction.updateMany({ where: { id: { in: ids } }, data }); if (dueMonth) await applyDueMonth(tx, ids, dueMonth); if (person) await tx.transactionShare.deleteMany({ where: { transactionId: { in: ids } } }); });
   revalidatePath("/lancamentos");
   revalidatePath("/faturas");
   revalidatePath("/faturas-a-vencer");
