@@ -4,8 +4,8 @@ import { createHash } from "crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { mapRawImportRow, parseStatement } from "@/lib/import-parser";
-import { invoiceDueDate, invoiceReferenceFromFileName } from "@/lib/invoice-period";
-import { calculateFirstBillingPeriod, calculateInstallmentBillingPeriods } from "@/lib/billing-period";
+import { invoiceReferenceFromFileName } from "@/lib/invoice-period";
+import { billingPeriodFromReferenceMonth, calculateFirstBillingPeriod } from "@/lib/billing-period";
 import { createOrConfirmImportedTransaction } from "@/lib/installment-service";
 import { prisma } from "@/lib/prisma";
 
@@ -28,13 +28,17 @@ export async function stageImport(formData: FormData) {
   const parsed = parseStatement(file.name, buffer); const rows = parsed.rows;
   const card = await prisma.card.findUnique({ where: { id: cardId }, select: { closingDay: true, dueDay: true } });
   const transactions = await prisma.transaction.findMany({ where: { cardId }, select: { id: true, amountCents: true, occurredAt: true, merchantNormalized: true } });
-  const referenceMonth = invoiceReferenceFromFileName(file.name);
-  const billingPeriod = referenceMonth && card ? calculateFirstBillingPeriod(referenceMonth, card.closingDay, card.dueDay) : null;
+  const explicitDueDate = parsed.dueDate ?? null;
+  const referenceMonth = explicitDueDate ? new Date(Date.UTC(explicitDueDate.getUTCFullYear(), explicitDueDate.getUTCMonth(), 1, 12)) : invoiceReferenceFromFileName(file.name);
+  const billingPeriod = referenceMonth && card ? explicitDueDate ? { ...billingPeriodFromReferenceMonth(referenceMonth, card.dueDay), estimatedDueDate: explicitDueDate } : calculateFirstBillingPeriod(referenceMonth, card.closingDay, card.dueDay) : null;
   const invoice = billingPeriod ? await prisma.invoice.upsert({ where: { cardId_referenceMonth: { cardId, referenceMonth: new Date(Date.UTC(billingPeriod.billingYear, billingPeriod.billingMonth - 1, 1, 12)) } }, update: { dueDate: billingPeriod.estimatedDueDate }, create: { cardId, referenceMonth: new Date(Date.UTC(billingPeriod.billingYear, billingPeriod.billingMonth - 1, 1, 12)), dueDate: billingPeriod.estimatedDueDate } }) : null;
   if (existing) {
     if (existing.status === "REVIEW") {
-      await prisma.$transaction(parsed.rows.slice(0, existing.rows.length).map((row, index) => { const dbRow = existing.rows.sort((a, b) => a.sourceLine - b.sourceLine)[index]; const merchant = row.description?.toUpperCase().replace(/[^A-Z0-9]/g, "") ?? ""; const duplicate = row.occurredAt && row.amountCents ? transactions.find(transaction => transaction.amountCents === row.amountCents && Math.abs(transaction.occurredAt.getTime() - row.occurredAt!.getTime()) <= 2 * 86400000 && transaction.merchantNormalized?.replace(/[^A-Z0-9]/g, "") === merchant) : undefined; return prisma.importRow.update({ where: { id: dbRow.id }, data: { ...row, status: !row.occurredAt || !row.description || !row.amountCents ? "NEEDS_REVIEW" : duplicate ? "POSSIBLE_DUPLICATE" : "NEW", duplicateOfId: duplicate?.id } }); }));
-      await prisma.importBatch.update({ where: { id: existing.id }, data: { mappingRequired: parsed.mappingRequired, invoiceId: invoice?.id ?? null } });
+      await prisma.$transaction(async tx => {
+        await tx.importRow.deleteMany({ where: { batchId: existing.id } });
+        await tx.importRow.createMany({ data: parsed.rows.map(row => { const merchant = row.description?.toUpperCase().replace(/[^A-Z0-9]/g, "") ?? ""; const duplicate = row.occurredAt && row.amountCents ? transactions.find(transaction => transaction.amountCents === row.amountCents && Math.abs(transaction.occurredAt.getTime() - row.occurredAt!.getTime()) <= 2 * 86400000 && transaction.merchantNormalized?.replace(/[^A-Z0-9]/g, "") === merchant) : undefined; return { ...row, batchId: existing.id, status: !row.occurredAt || !row.description || !row.amountCents ? "NEEDS_REVIEW" as const : duplicate ? "POSSIBLE_DUPLICATE" as const : "NEW" as const, duplicateOfId: duplicate?.id }; }) });
+        await tx.importBatch.update({ where: { id: existing.id }, data: { mappingRequired: parsed.mappingRequired, invoiceId: invoice?.id ?? null } });
+      });
     }
     redirect(`/importar/${existing.id}`);
   }

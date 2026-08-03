@@ -1,7 +1,7 @@
 import * as XLSX from "xlsx";
 
 export type ParsedImportRow = { sourceLine: number; rawData: string; occurredAt: Date | null; description: string | null; amountCents: number | null; installmentNo: number | null; installmentTotal: number | null };
-export type ParsedStatement = { rows: ParsedImportRow[]; mappingRequired: boolean };
+export type ParsedStatement = { rows: ParsedImportRow[]; mappingRequired: boolean; dueDate?: Date | null };
 
 const normalize = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 
@@ -19,10 +19,10 @@ function referenceDateFromFileName(fileName: string) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-export function parseImportedDate(value: string, referenceDate: Date | null = null) {
+export function parseImportedDate(value: string, referenceDate: Date | null = null, order: "DMY" | "MDY" = "DMY") {
   const text = value.trim(); if (!text) return null;
   const brazilian = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
-  if (brazilian) { const year = brazilian[3].length === 2 ? `20${brazilian[3]}` : brazilian[3]; const date = new Date(`${year}-${brazilian[2].padStart(2, "0")}-${brazilian[1].padStart(2, "0")}T12:00:00`); return Number.isNaN(date.getTime()) ? null : date; }
+  if (brazilian) { const year = brazilian[3].length === 2 ? `20${brazilian[3]}` : brazilian[3]; const month = order === "MDY" ? brazilian[1] : brazilian[2]; const day = order === "MDY" ? brazilian[2] : brazilian[1]; const date = new Date(`${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T12:00:00`); return Number.isNaN(date.getTime()) ? null : date; }
   const dayMonth = text.match(/^(\d{1,2})[/-](\d{1,2})$/);
   if (dayMonth && referenceDate) { const month = Number(dayMonth[2]); let year = referenceDate.getFullYear(); if (month > referenceDate.getMonth() + 1) year -= 1; const date = new Date(`${year}-${String(month).padStart(2, "0")}-${dayMonth[1].padStart(2, "0")}T12:00:00`); return Number.isNaN(date.getTime()) ? null : date; }
   const iso = new Date(`${text.slice(0, 10)}T12:00:00`); return Number.isNaN(iso.getTime()) ? null : iso;
@@ -30,7 +30,8 @@ export function parseImportedDate(value: string, referenceDate: Date | null = nu
 
 export function parseImportedAmount(value: string) {
   const text = value.replace(/R\$\s?/gi, "").replace(/\s/g, ""); if (!text) return null;
-  const normalized = text.includes(",") ? text.replace(/\./g, "").replace(",", ".") : text;
+  const lastComma = text.lastIndexOf(","); const lastDot = text.lastIndexOf(".");
+  const normalized = lastComma >= 0 && lastDot >= 0 ? lastComma > lastDot ? text.replace(/\./g, "").replace(",", ".") : text.replace(/,/g, "") : lastComma >= 0 ? text.replace(/\./g, "").replace(",", ".") : text;
   const cents = Math.round(Number(normalized) * 100); return Number.isSafeInteger(cents) && cents !== 0 ? cents : null;
 }
 
@@ -38,7 +39,7 @@ function fieldIndex(headers: string[], names: string[]) { return headers.findInd
 
 function parseInstallment(...values: Array<string | null | undefined>) {
   for (const value of values) {
-    const match = value?.match(/(?:^|\D)(\d{1,2})\s*\/\s*(\d{1,2})(?:\D|$)/);
+    const match = value?.match(/(?:^|\D)(\d{1,2})\s*(?:\/|de)\s*(\d{1,2})(?:\D|$)/i);
     if (!match) continue;
     const installmentNo = Number(match[1]);
     const installmentTotal = Number(match[2]);
@@ -77,7 +78,13 @@ export function parseStatement(fileName: string, buffer: Buffer): ParsedStatemen
   else throw new Error("Envie um arquivo CSV ou XLSX.");
   if (matrix.length < 2) throw new Error("O arquivo não possui lançamentos suficientes.");
   const header = findHeader(matrix);
-  if (header) return { mappingRequired: false, rows: matrix.slice(header.headerRow + 1).filter(row => row.some(value => value.trim())).map((row, index) => { const description = row[header.descriptionIndex]?.trim() || null; const installment = parseInstallment(header.installmentIndex >= 0 ? row[header.installmentIndex] : null, description); return { sourceLine: header.headerRow + index + 2, rawData: JSON.stringify(Object.fromEntries(header.headers.map((column, position) => [column, row[position] ?? ""]))), occurredAt: parseImportedDate(row[header.dateIndex] ?? "", referenceDate), description, amountCents: parseImportedAmount(row[header.amountIndex] ?? ""), ...installment }; }) };
+  if (header) {
+    const afterHeader = matrix.slice(header.headerRow + 1); const firstBlank = afterHeader.findIndex((row, index) => index > 0 && !row.some(value => value.trim())); const dataRows = firstBlank >= 0 ? afterHeader.slice(0, firstBlank) : afterHeader;
+    const dateOrder = dataRows.some(row => { const match = (row[header.dateIndex] ?? "").match(/^(\d{1,2})[/-](\d{1,2})[/-]\d{2,4}$/); return Boolean(match && Number(match[2]) > 12); }) ? "MDY" as const : "DMY" as const;
+    const dueDate = matrix.flatMap((row, rowIndex) => row.map((value, columnIndex) => ({ value, rowIndex, columnIndex }))).find(cell => normalize(cell.value) === "vencimento");
+    const parsedDueDate = dueDate ? parseImportedDate(matrix[dueDate.rowIndex + 1]?.[dueDate.columnIndex] ?? "", null, dateOrder) : null;
+    return { mappingRequired: false, dueDate: parsedDueDate, rows: dataRows.filter(row => row.some(value => value.trim())).map((row, index) => { const description = row[header.descriptionIndex]?.trim() || null; const installment = parseInstallment(header.installmentIndex >= 0 ? row[header.installmentIndex] : null, description); return { sourceLine: header.headerRow + index + 2, rawData: JSON.stringify(Object.fromEntries(header.headers.map((column, position) => [column, row[position] ?? ""]))), occurredAt: parseImportedDate(row[header.dateIndex] ?? "", referenceDate, dateOrder), description, amountCents: parseImportedAmount(row[header.amountIndex] ?? ""), ...installment }; }) };
+  }
   const firstRow = matrix.findIndex(row => row.filter(value => value.trim()).length >= 2);
   const candidate = firstRow >= 0 ? matrix[firstRow] : [];
   const headers = candidate.map((value, index) => value.trim() || `Coluna ${index + 1}`);
