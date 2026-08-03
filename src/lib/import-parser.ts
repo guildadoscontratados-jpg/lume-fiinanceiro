@@ -36,6 +36,17 @@ export function parseImportedAmount(value: string) {
 
 function fieldIndex(headers: string[], names: string[]) { return headers.findIndex(header => names.some(name => header === name || header.includes(name))); }
 
+function parseInstallment(...values: Array<string | null | undefined>) {
+  for (const value of values) {
+    const match = value?.match(/(?:^|\D)(\d{1,2})\s*\/\s*(\d{1,2})(?:\D|$)/);
+    if (!match) continue;
+    const installmentNo = Number(match[1]);
+    const installmentTotal = Number(match[2]);
+    if (installmentNo >= 1 && installmentTotal >= installmentNo) return { installmentNo, installmentTotal };
+  }
+  return { installmentNo: null, installmentTotal: null };
+}
+
 function findHeader(matrix: string[][]) {
   const dateNames = ["data", "date", "dt", "dia"];
   const descriptionNames = ["estabelecimento", "descri", "lançamento", "lancamento", "merchant", "histórico", "historico", "detalhe", "transação", "transacao", "nome", "local", "titulo", "título"];
@@ -43,7 +54,8 @@ function findHeader(matrix: string[][]) {
   for (let index = 0; index < Math.min(matrix.length, 30); index += 1) {
     const headers = matrix[index].map(value => normalize(value));
     const dateIndex = fieldIndex(headers, dateNames); const descriptionIndex = fieldIndex(headers, descriptionNames); const amountIndex = fieldIndex(headers, amountNames);
-    if (dateIndex >= 0 && descriptionIndex >= 0 && amountIndex >= 0) return { headerRow: index, headers, dateIndex, descriptionIndex, amountIndex };
+    const installmentIndex = fieldIndex(headers, ["parcela", "parcelamento", "installment"]);
+    if (dateIndex >= 0 && descriptionIndex >= 0 && amountIndex >= 0) return { headerRow: index, headers, dateIndex, descriptionIndex, amountIndex, installmentIndex };
   }
   return null;
 }
@@ -51,8 +63,9 @@ function findHeader(matrix: string[][]) {
 export function mapRawImportRow(rawData: string, dateField: string, descriptionField: string, amountField: string, referenceDate: Date | null = null) {
   const source = JSON.parse(rawData) as Record<string, string>;
   const description = source[descriptionField]?.trim() || null;
-  const installment = description?.match(/\b(\d{1,2})\s*\/\s*(\d{1,2})\b/);
-  return { occurredAt: parseImportedDate(source[dateField] ?? "", referenceDate), description, amountCents: parseImportedAmount(source[amountField] ?? ""), installmentNo: installment ? Number(installment[1]) : null, installmentTotal: installment ? Number(installment[2]) : null };
+  const installmentField = Object.entries(source).find(([field]) => ["parcela", "parcelamento", "installment"].some(name => normalize(field).includes(name)))?.[1];
+  const installment = parseInstallment(installmentField, description);
+  return { occurredAt: parseImportedDate(source[dateField] ?? "", referenceDate), description, amountCents: parseImportedAmount(source[amountField] ?? ""), ...installment };
 }
 
 export function parseStatement(fileName: string, buffer: Buffer): ParsedStatement {
@@ -64,7 +77,7 @@ export function parseStatement(fileName: string, buffer: Buffer): ParsedStatemen
   else throw new Error("Envie um arquivo CSV ou XLSX.");
   if (matrix.length < 2) throw new Error("O arquivo não possui lançamentos suficientes.");
   const header = findHeader(matrix);
-  if (header) return { mappingRequired: false, rows: matrix.slice(header.headerRow + 1).filter(row => row.some(value => value.trim())).map((row, index) => { const description = row[header.descriptionIndex]?.trim() || null; const installment = description?.match(/\b(\d{1,2})\s*\/\s*(\d{1,2})\b/); return { sourceLine: header.headerRow + index + 2, rawData: JSON.stringify(Object.fromEntries(header.headers.map((column, position) => [column, row[position] ?? ""]))), occurredAt: parseImportedDate(row[header.dateIndex] ?? "", referenceDate), description, amountCents: parseImportedAmount(row[header.amountIndex] ?? ""), installmentNo: installment ? Number(installment[1]) : null, installmentTotal: installment ? Number(installment[2]) : null }; }) };
+  if (header) return { mappingRequired: false, rows: matrix.slice(header.headerRow + 1).filter(row => row.some(value => value.trim())).map((row, index) => { const description = row[header.descriptionIndex]?.trim() || null; const installment = parseInstallment(header.installmentIndex >= 0 ? row[header.installmentIndex] : null, description); return { sourceLine: header.headerRow + index + 2, rawData: JSON.stringify(Object.fromEntries(header.headers.map((column, position) => [column, row[position] ?? ""]))), occurredAt: parseImportedDate(row[header.dateIndex] ?? "", referenceDate), description, amountCents: parseImportedAmount(row[header.amountIndex] ?? ""), ...installment }; }) };
   const firstRow = matrix.findIndex(row => row.filter(value => value.trim()).length >= 2);
   const candidate = firstRow >= 0 ? matrix[firstRow] : [];
   const headers = candidate.map((value, index) => value.trim() || `Coluna ${index + 1}`);
