@@ -8,7 +8,7 @@
     "start": "next start",
     "postinstall": "prisma generate",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test src/lib/billing-period.test.ts",
+    "test": "node --experimental-strip-types --test src/lib/billing-period.test.ts src/lib/auth/session.test.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev"
   },

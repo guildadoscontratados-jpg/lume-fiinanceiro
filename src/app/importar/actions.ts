@@ -58,7 +58,84 @@ export async function confirmImport(batchId: string, formData: FormData) {
   const batch = await prisma.importBatch.findUnique({ where: { id: batchId }, include: { rows: true, invoice: true } });
   if (!batch || batch.status !== "REVIEW") throw new Error("Este lote não está disponível para confirmação.");
   const selected = new Set(formData.getAll("selected").map(String));
-  await prisma.$transaction(async tx => { for (const row of batch.rows) { if (!selected.has(row.id)) { await tx.importRow.update({ where: { id: row.id }, data: { status: "SKIPPED" } }); continue; } const description = String(formData.get(`description-${row.id}`) ?? "").trim(); const dateText = String(formData.get(`date-${row.id}`) ?? ""); const amountText = String(formData.get(`amount-${row.id}`) ?? ""); const amountCents = Math.round(Number(amountText.replace(",", ".")) * 100); if (!description || !dateText || !Number.isSafeInteger(amountCents) || amountCents === 0) throw new Error("Revise descrição, data e valor dos lançamentos selecionados."); const shareCount = Math.max(1, Number(formData.get(`share-count-${row.id}`) ?? 1)); const shares = Array.from({ length: shareCount }, (_, index) => ({ personId: String(formData.get(`share-person-${row.id}-${index}`) ?? ""), percentageBps: parseImportPercentage(formData.get(`share-percent-${row.id}-${index}`)) })).filter(share => share.personId); const hasPercentages = shareCount > 1; if (shares.length > 1 && shares.reduce((sum, share) => sum + share.percentageBps, 0) !== 10000) throw new Error("A divisão entre pessoas deve totalizar exatamente 100%."); if (shares.length === 1) shares[0].percentageBps = 10000; if (hasPercentages && shares.length !== shareCount) throw new Error("Selecione uma pessoa em cada linha da divisão."); const personId = shares.length === 1 ? shares[0].personId : null; const categoryId = String(formData.get(`category-${row.id}`) ?? "") || null; const transaction = await createOrConfirmImportedTransaction(tx, { cardId: batch.cardId, invoiceId: batch.invoiceId, invoiceMonth: batch.invoice?.referenceMonth ?? null, description, occurredAt: new Date(`${dateText}T12:00:00`), amountCents, installmentNo: row.installmentNo, installmentTotal: row.installmentTotal, personId, categoryId, shares, notes: `Importado de ${batch.fileName}, linha ${row.sourceLine}` }); await tx.importRow.update({ where: { id: row.id }, data: { status: "IMPORTED", transactionId: transaction.id, description, occurredAt: transaction.occurredAt, amountCents } }); } await tx.importBatch.update({ where: { id: batch.id }, data: { status: "CONFIRMED", confirmedAt: new Date() } }); });
+  await prisma.$transaction(
+    async tx => {
+      for (const row of batch.rows) {
+        if (!selected.has(row.id)) {
+          await tx.importRow.update({
+            where: { id: row.id },
+            data: { status: "SKIPPED" },
+          });
+          continue;
+        }
+
+        const description = String(formData.get(`description-${row.id}`) ?? "").trim();
+        const dateText = String(formData.get(`date-${row.id}`) ?? "");
+        const amountText = String(formData.get(`amount-${row.id}`) ?? "");
+        const amountCents = Math.round(Number(amountText.replace(",", ".")) * 100);
+
+        if (!description || !dateText || !Number.isSafeInteger(amountCents) || amountCents === 0) {
+          throw new Error("Revise descrição, data e valor dos lançamentos selecionados.");
+        }
+
+        const shareCount = Math.max(1, Number(formData.get(`share-count-${row.id}`) ?? 1));
+        const shares = Array.from({ length: shareCount }, (_, index) => ({
+          personId: String(formData.get(`share-person-${row.id}-${index}`) ?? ""),
+          percentageBps: parseImportPercentage(formData.get(`share-percent-${row.id}-${index}`)),
+        })).filter(share => share.personId);
+
+        const hasPercentages = shareCount > 1;
+
+        if (shares.length > 1 && shares.reduce((sum, share) => sum + share.percentageBps, 0) !== 10000) {
+          throw new Error("A divisão entre pessoas deve totalizar exatamente 100%.");
+        }
+
+        if (shares.length === 1) shares[0].percentageBps = 10000;
+
+        if (hasPercentages && shares.length !== shareCount) {
+          throw new Error("Selecione uma pessoa em cada linha da divisão.");
+        }
+
+        const personId = shares.length === 1 ? shares[0].personId : null;
+        const categoryId = String(formData.get(`category-${row.id}`) ?? "") || null;
+
+        const transaction = await createOrConfirmImportedTransaction(tx, {
+          cardId: batch.cardId,
+          invoiceId: batch.invoiceId,
+          invoiceMonth: batch.invoice?.referenceMonth ?? null,
+          description,
+          occurredAt: new Date(`${dateText}T12:00:00`),
+          amountCents,
+          installmentNo: row.installmentNo,
+          installmentTotal: row.installmentTotal,
+          personId,
+          categoryId,
+          shares,
+          notes: `Importado de ${batch.fileName}, linha ${row.sourceLine}`,
+        });
+
+        await tx.importRow.update({
+          where: { id: row.id },
+          data: {
+            status: "IMPORTED",
+            transactionId: transaction.id,
+            description,
+            occurredAt: transaction.occurredAt,
+            amountCents,
+          },
+        });
+      }
+
+      await tx.importBatch.update({
+        where: { id: batch.id },
+        data: { status: "CONFIRMED", confirmedAt: new Date() },
+      });
+    },
+    {
+      maxWait: 10_000,
+      timeout: 60_000,
+    },
+  );
   if (batch.invoiceId) { const totals = await prisma.transaction.aggregate({ where: { invoiceId: batch.invoiceId, status: { not: "VOID" } }, _sum: { amountCents: true } }); await prisma.invoice.update({ where: { id: batch.invoiceId }, data: { totalCents: totals._sum.amountCents ?? 0 } }); }
   revalidatePath("/"); revalidatePath("/faturas"); revalidatePath("/lancamentos"); revalidatePath("/parcelamentos"); revalidatePath(`/importar/${batchId}`); redirect("/lancamentos");
 }
