@@ -22,6 +22,27 @@ async function setDueDate(tx: Prisma.TransactionClient, cardId: string, ids: str
   await tx.installment.updateMany({ where: { transactionId: { in: ids } }, data: { dueMonth: referenceMonth, billingMonth, billingYear, billingReference, estimatedDueDate: dueDate } });
 }
 
+function shiftedDueDate(base: Date, monthOffset: number) {
+  const targetMonth = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + monthOffset, 1, 12));
+  const lastDay = new Date(Date.UTC(targetMonth.getUTCFullYear(), targetMonth.getUTCMonth() + 1, 0, 12)).getUTCDate();
+  return new Date(Date.UTC(targetMonth.getUTCFullYear(), targetMonth.getUTCMonth(), Math.min(base.getUTCDate(), lastDay), 12));
+}
+
+async function shiftCurrentAndFutureInstallments(tx: Prisma.TransactionClient, cardId: string, planId: string, currentSequence: number, firstDueDate: Date) {
+  const installments = await tx.installment.findMany({ where: { planId, sequence: { gte: currentSequence } }, orderBy: { sequence: "asc" } });
+  for (const installment of installments) {
+    const dueDate = shiftedDueDate(firstDueDate, installment.sequence - currentSequence);
+    const dueMonth = new Date(Date.UTC(dueDate.getUTCFullYear(), dueDate.getUTCMonth(), 1, 12));
+    const billingMonth = dueDate.getUTCMonth() + 1;
+    const billingYear = dueDate.getUTCFullYear();
+    const billingReference = `${String(billingMonth).padStart(2, "0")}/${billingYear}`;
+    await tx.installment.update({ where: { id: installment.id }, data: { dueMonth, billingMonth, billingYear, billingReference, estimatedDueDate: dueDate } });
+    if (installment.transactionId) await setDueDate(tx, cardId, [installment.transactionId], dueDate);
+  }
+  const last = await tx.installment.findFirst({ where: { planId }, orderBy: { sequence: "desc" }, select: { dueMonth: true } });
+  if (last) await tx.installmentPlan.update({ where: { id: planId }, data: { endDate: last.dueMonth } });
+}
+
 function percentage(value: FormDataEntryValue | null) {
   const parsed = Math.round(Number(String(value ?? "").trim().replace(",", ".")) * 100);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 0;
@@ -74,7 +95,7 @@ export async function updateDueItemShares(cardId: string, formData: FormData) {
   const transactionId = String(formData.get("transactionId") ?? "");
   const count = Math.max(1, Math.trunc(Number(formData.get("shareCount") ?? 1)));
   const scope = String(formData.get("scope") ?? "ONLY_THIS");
-  const transaction = await prisma.transaction.findFirst({ where: { id: transactionId, cardId }, select: { id: true, installmentPlanId: true } });
+  const transaction = await prisma.transaction.findFirst({ where: { id: transactionId, cardId }, select: { id: true, installmentPlanId: true, installment: { select: { sequence: true } } } });
   if (!transaction) throw new Error("Lançamento não encontrado.");
   const shares = Array.from({ length: count }, (_, index) => ({ personId: String(formData.get(`sharePerson-${index}`) ?? ""), percentageBps: percentage(formData.get(`sharePercent-${index}`)) })).filter(item => item.personId);
   if (shares.length !== count) throw new Error("Selecione uma pessoa em cada linha do rateio.");
@@ -105,7 +126,7 @@ export async function updateDueItemField(cardId: string, formData: FormData) {
   const value = String(formData.get("value") ?? "");
   const scope = String(formData.get("scope") ?? "ONLY_THIS");
   if (!value || !["categoryId", "personId", "dueDate"].includes(field)) throw new Error("Alteração inválida.");
-  const transaction = await prisma.transaction.findFirst({ where: { id: transactionId, cardId }, select: { id: true, installmentPlanId: true } });
+  const transaction = await prisma.transaction.findFirst({ where: { id: transactionId, cardId }, select: { id: true, installmentPlanId: true, installment: { select: { sequence: true } } } });
   if (!transaction) throw new Error("Lançamento não encontrado.");
   if (field === "categoryId" && !await prisma.category.findFirst({ where: { id: value, active: true } })) throw new Error("Categoria indisponível.");
   if (field === "personId" && !await prisma.person.findFirst({ where: { id: value, status: "ACTIVE" } })) throw new Error("Pessoa indisponível.");
@@ -113,7 +134,8 @@ export async function updateDueItemField(cardId: string, formData: FormData) {
     const ids = scope === "ALL" && transaction.installmentPlanId
       ? (await tx.transaction.findMany({ where: { installmentPlanId: transaction.installmentPlanId }, select: { id: true } })).map(item => item.id)
       : [transactionId];
-    if (field === "dueDate") await setDueDate(tx, cardId, [transactionId], parsedDate(value));
+    if (field === "dueDate" && scope === "THIS_AND_FUTURE" && transaction.installmentPlanId && transaction.installment) await shiftCurrentAndFutureInstallments(tx, cardId, transaction.installmentPlanId, transaction.installment.sequence, parsedDate(value));
+    else if (field === "dueDate") await setDueDate(tx, cardId, [transactionId], parsedDate(value));
     else await tx.transaction.updateMany({ where: { id: { in: ids } }, data: field === "categoryId" ? { categoryId: value } : { personId: value } });
     if (field === "personId") await tx.transactionShare.deleteMany({ where: { transactionId: { in: ids } } });
     if (scope === "ALL" && transaction.installmentPlanId) await tx.installmentPlan.update({ where: { id: transaction.installmentPlanId }, data: field === "categoryId" ? { categoryId: value } : { personId: value } });
