@@ -83,7 +83,17 @@ export async function bulkClassifyDueItems(cardId: string, formData: FormData) {
     if (!card) throw new Error("Cartão não encontrado.");
     const lastDay = new Date(Date.UTC(year, month, 0, 12)).getUTCDate();
     const dueDate = new Date(Date.UTC(year, month - 1, Math.min(Math.max(1, card.dueDay), lastDay), 12));
-    await prisma.$transaction(tx => setDueDate(tx, cardId, validIds, dueDate));
+    const scope = String(formData.get("scope") ?? "ONLY_THIS");
+    const installmentItems = await prisma.transaction.findMany({ where: { id: { in: validIds }, installmentPlanId: { not: null } }, select: { id: true, installmentPlanId: true, installment: { select: { sequence: true } } } });
+    const installmentIds = new Set(installmentItems.map(item => item.id));
+    const plainIds = validIds.filter(id => !installmentIds.has(id));
+    await prisma.$transaction(async tx => {
+      if (plainIds.length) await setDueDate(tx, cardId, plainIds, dueDate);
+      for (const item of installmentItems) {
+        if (scope === "THIS_AND_FUTURE" && item.installmentPlanId && item.installment) await shiftCurrentAndFutureInstallments(tx, cardId, item.installmentPlanId, item.installment.sequence, dueDate);
+        else await setDueDate(tx, cardId, [item.id], dueDate);
+      }
+    });
   } else throw new Error("Escolha a alteração que deseja aplicar.");
 
   revalidatePath(`/faturas-a-vencer/${cardId}`);
@@ -139,6 +149,29 @@ export async function updateDueItemField(cardId: string, formData: FormData) {
     else await tx.transaction.updateMany({ where: { id: { in: ids } }, data: field === "categoryId" ? { categoryId: value } : { personId: value } });
     if (field === "personId") await tx.transactionShare.deleteMany({ where: { transactionId: { in: ids } } });
     if (scope === "ALL" && transaction.installmentPlanId) await tx.installmentPlan.update({ where: { id: transaction.installmentPlanId }, data: field === "categoryId" ? { categoryId: value } : { personId: value } });
+  });
+  revalidatePath(`/faturas-a-vencer/${cardId}`);
+  revalidatePath("/faturas-a-vencer");
+  revalidatePath("/lancamentos");
+  revalidatePath("/parcelamentos");
+  revalidatePath("/previsoes");
+}
+
+export async function updateProjectedDueDate(cardId: string, formData: FormData) {
+  const installmentId = String(formData.get("installmentId") ?? "");
+  const value = String(formData.get("value") ?? "");
+  const scope = String(formData.get("scope") ?? "ONLY_THIS");
+  const installment = await prisma.installment.findFirst({ where: { id: installmentId, plan: { cardId } }, select: { id: true, planId: true, sequence: true, transactionId: true } });
+  if (!installment) throw new Error("Parcela não encontrada.");
+  const dueDate = parsedDate(value);
+  await prisma.$transaction(async tx => {
+    if (scope === "THIS_AND_FUTURE") { await shiftCurrentAndFutureInstallments(tx, cardId, installment.planId, installment.sequence, dueDate); return; }
+    const dueMonth = new Date(Date.UTC(dueDate.getUTCFullYear(), dueDate.getUTCMonth(), 1, 12));
+    const billingMonth = dueDate.getUTCMonth() + 1;
+    const billingYear = dueDate.getUTCFullYear();
+    const billingReference = `${String(billingMonth).padStart(2, "0")}/${billingYear}`;
+    await tx.installment.update({ where: { id: installment.id }, data: { dueMonth, billingMonth, billingYear, billingReference, estimatedDueDate: dueDate } });
+    if (installment.transactionId) await setDueDate(tx, cardId, [installment.transactionId], dueDate);
   });
   revalidatePath(`/faturas-a-vencer/${cardId}`);
   revalidatePath("/faturas-a-vencer");
