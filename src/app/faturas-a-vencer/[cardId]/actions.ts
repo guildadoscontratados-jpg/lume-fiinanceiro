@@ -52,7 +52,10 @@ function percentage(value: FormDataEntryValue | null) {
 export async function createDueCategory(cardId: string, formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   if (!name) throw new Error("Informe o nome da categoria.");
-  await prisma.category.create({ data: { name, color: String(formData.get("color") ?? "").trim() || null } });
+  const parentId = String(formData.get("parentId") ?? "").trim();
+  if (!parentId) throw new Error("Escolha o grupo dessa subcategoria.");
+  if (!await prisma.category.findFirst({ where: { id: parentId, parentId: null } })) throw new Error("Grupo inválido.");
+  await prisma.category.create({ data: { name, parentId, color: String(formData.get("color") ?? "").trim() || null } });
   revalidatePath(`/faturas-a-vencer/${cardId}`);
   revalidatePath("/categorias");
 }
@@ -72,6 +75,7 @@ export async function bulkClassifyDueItems(cardId: string, formData: FormData) {
     if (validInstallments.length) throw new Error("Parcelas previstas só podem ter o vencimento alterado em massa.");
     const categoryId = String(formData.get("categoryId") ?? "");
     if (!categoryId) throw new Error("Escolha uma categoria.");
+    if (!await prisma.category.findFirst({ where: { id: categoryId, parentId: { not: null } } })) throw new Error("Escolha uma subcategoria — o grupo não pode ser usado diretamente.");
     await prisma.transaction.updateMany({ where: { id: { in: validIds } }, data: { categoryId } });
   } else if (action === "PERSON") {
     if (validInstallments.length) throw new Error("Parcelas previstas só podem ter o vencimento alterado em massa.");
@@ -150,7 +154,7 @@ export async function updateDueItemField(cardId: string, formData: FormData) {
   if (!value || !["categoryId", "personId", "dueDate"].includes(field)) throw new Error("Alteração inválida.");
   const transaction = await prisma.transaction.findFirst({ where: { id: transactionId, cardId }, select: { id: true, installmentPlanId: true, installment: { select: { sequence: true } } } });
   if (!transaction) throw new Error("Lançamento não encontrado.");
-  if (field === "categoryId" && !await prisma.category.findFirst({ where: { id: value, active: true } })) throw new Error("Categoria indisponível.");
+  if (field === "categoryId" && !await prisma.category.findFirst({ where: { id: value, active: true, parentId: { not: null } } })) throw new Error("Escolha uma subcategoria — o grupo não pode ser usado diretamente.");
   if (field === "personId" && !await prisma.person.findFirst({ where: { id: value, status: "ACTIVE" } })) throw new Error("Pessoa indisponível.");
   await prisma.$transaction(async tx => {
     const ids = scope === "ALL" && transaction.installmentPlanId
