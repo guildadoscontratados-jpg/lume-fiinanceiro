@@ -28,17 +28,18 @@ function shiftedDueDate(base: Date, monthOffset: number) {
   return new Date(Date.UTC(targetMonth.getUTCFullYear(), targetMonth.getUTCMonth(), Math.min(base.getUTCDate(), lastDay), 12));
 }
 
+async function setInstallmentDueDate(tx: Prisma.TransactionClient, cardId: string, installment: { id: string; transactionId: string | null }, dueDate: Date) {
+  const dueMonth = new Date(Date.UTC(dueDate.getUTCFullYear(), dueDate.getUTCMonth(), 1, 12));
+  const billingMonth = dueDate.getUTCMonth() + 1;
+  const billingYear = dueDate.getUTCFullYear();
+  const billingReference = `${String(billingMonth).padStart(2, "0")}/${billingYear}`;
+  await tx.installment.update({ where: { id: installment.id }, data: { dueMonth, billingMonth, billingYear, billingReference, estimatedDueDate: dueDate } });
+  if (installment.transactionId) await setDueDate(tx, cardId, [installment.transactionId], dueDate);
+}
+
 async function shiftCurrentAndFutureInstallments(tx: Prisma.TransactionClient, cardId: string, planId: string, currentSequence: number, firstDueDate: Date) {
   const installments = await tx.installment.findMany({ where: { planId, sequence: { gte: currentSequence } }, orderBy: { sequence: "asc" } });
-  for (const installment of installments) {
-    const dueDate = shiftedDueDate(firstDueDate, installment.sequence - currentSequence);
-    const dueMonth = new Date(Date.UTC(dueDate.getUTCFullYear(), dueDate.getUTCMonth(), 1, 12));
-    const billingMonth = dueDate.getUTCMonth() + 1;
-    const billingYear = dueDate.getUTCFullYear();
-    const billingReference = `${String(billingMonth).padStart(2, "0")}/${billingYear}`;
-    await tx.installment.update({ where: { id: installment.id }, data: { dueMonth, billingMonth, billingYear, billingReference, estimatedDueDate: dueDate } });
-    if (installment.transactionId) await setDueDate(tx, cardId, [installment.transactionId], dueDate);
-  }
+  for (const installment of installments) await setInstallmentDueDate(tx, cardId, installment, shiftedDueDate(firstDueDate, installment.sequence - currentSequence));
   const last = await tx.installment.findFirst({ where: { planId }, orderBy: { sequence: "desc" }, select: { dueMonth: true } });
   if (last) await tx.installmentPlan.update({ where: { id: planId }, data: { endDate: last.dueMonth } });
 }
@@ -58,17 +59,22 @@ export async function createDueCategory(cardId: string, formData: FormData) {
 
 export async function bulkClassifyDueItems(cardId: string, formData: FormData) {
   const ids = [...new Set(formData.getAll("selected").map(String).filter(Boolean))];
-  if (!ids.length) throw new Error("Selecione ao menos um lançamento.");
+  const installmentIds = [...new Set(formData.getAll("selectedInstallments").map(String).filter(Boolean))];
+  if (!ids.length && !installmentIds.length) throw new Error("Selecione ao menos um lançamento.");
   const action = String(formData.get("bulkAction") ?? "");
   const valid = await prisma.transaction.findMany({ where: { id: { in: ids }, cardId }, select: { id: true } });
   const validIds = valid.map(item => item.id);
   if (validIds.length !== ids.length) throw new Error("Há lançamentos inválidos na seleção.");
+  const validInstallments = await prisma.installment.findMany({ where: { id: { in: installmentIds }, plan: { cardId } }, select: { id: true, planId: true, sequence: true, transactionId: true } });
+  if (validInstallments.length !== installmentIds.length) throw new Error("Há parcelas inválidas na seleção.");
 
   if (action === "CATEGORY") {
+    if (validInstallments.length) throw new Error("Parcelas previstas só podem ter o vencimento alterado em massa.");
     const categoryId = String(formData.get("categoryId") ?? "");
     if (!categoryId) throw new Error("Escolha uma categoria.");
     await prisma.transaction.updateMany({ where: { id: { in: validIds } }, data: { categoryId } });
   } else if (action === "PERSON") {
+    if (validInstallments.length) throw new Error("Parcelas previstas só podem ter o vencimento alterado em massa.");
     const personId = String(formData.get("personId") ?? "");
     if (!personId) throw new Error("Escolha o devedor.");
     await prisma.$transaction([
@@ -85,13 +91,17 @@ export async function bulkClassifyDueItems(cardId: string, formData: FormData) {
     const dueDate = new Date(Date.UTC(year, month - 1, Math.min(Math.max(1, card.dueDay), lastDay), 12));
     const scope = String(formData.get("scope") ?? "ONLY_THIS");
     const installmentItems = await prisma.transaction.findMany({ where: { id: { in: validIds }, installmentPlanId: { not: null } }, select: { id: true, installmentPlanId: true, installment: { select: { sequence: true } } } });
-    const installmentIds = new Set(installmentItems.map(item => item.id));
-    const plainIds = validIds.filter(id => !installmentIds.has(id));
+    const transactionInstallmentIds = new Set(installmentItems.map(item => item.id));
+    const plainIds = validIds.filter(id => !transactionInstallmentIds.has(id));
     await prisma.$transaction(async tx => {
       if (plainIds.length) await setDueDate(tx, cardId, plainIds, dueDate);
       for (const item of installmentItems) {
         if (scope === "THIS_AND_FUTURE" && item.installmentPlanId && item.installment) await shiftCurrentAndFutureInstallments(tx, cardId, item.installmentPlanId, item.installment.sequence, dueDate);
         else await setDueDate(tx, cardId, [item.id], dueDate);
+      }
+      for (const installment of validInstallments) {
+        if (scope === "THIS_AND_FUTURE") await shiftCurrentAndFutureInstallments(tx, cardId, installment.planId, installment.sequence, dueDate);
+        else await setInstallmentDueDate(tx, cardId, installment, dueDate);
       }
     });
   } else throw new Error("Escolha a alteração que deseja aplicar.");
@@ -99,6 +109,8 @@ export async function bulkClassifyDueItems(cardId: string, formData: FormData) {
   revalidatePath(`/faturas-a-vencer/${cardId}`);
   revalidatePath("/faturas-a-vencer");
   revalidatePath("/lancamentos");
+  revalidatePath("/parcelamentos");
+  revalidatePath("/previsoes");
 }
 
 export async function updateDueItemShares(cardId: string, formData: FormData) {
@@ -165,13 +177,8 @@ export async function updateProjectedDueDate(cardId: string, formData: FormData)
   if (!installment) throw new Error("Parcela não encontrada.");
   const dueDate = parsedDate(value);
   await prisma.$transaction(async tx => {
-    if (scope === "THIS_AND_FUTURE") { await shiftCurrentAndFutureInstallments(tx, cardId, installment.planId, installment.sequence, dueDate); return; }
-    const dueMonth = new Date(Date.UTC(dueDate.getUTCFullYear(), dueDate.getUTCMonth(), 1, 12));
-    const billingMonth = dueDate.getUTCMonth() + 1;
-    const billingYear = dueDate.getUTCFullYear();
-    const billingReference = `${String(billingMonth).padStart(2, "0")}/${billingYear}`;
-    await tx.installment.update({ where: { id: installment.id }, data: { dueMonth, billingMonth, billingYear, billingReference, estimatedDueDate: dueDate } });
-    if (installment.transactionId) await setDueDate(tx, cardId, [installment.transactionId], dueDate);
+    if (scope === "THIS_AND_FUTURE") await shiftCurrentAndFutureInstallments(tx, cardId, installment.planId, installment.sequence, dueDate);
+    else await setInstallmentDueDate(tx, cardId, installment, dueDate);
   });
   revalidatePath(`/faturas-a-vencer/${cardId}`);
   revalidatePath("/faturas-a-vencer");
