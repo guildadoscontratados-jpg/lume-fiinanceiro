@@ -17,14 +17,15 @@ export function DueInvoiceEditor({ title, rows, projected, people, categories, b
   const [extraPeople, setExtraPeople] = useState<Record<string, string>>(() => Object.fromEntries(rows.flatMap(row => row.shares.slice(1).map((share, index) => [`${row.id}-${index + 1}`, share.personId]))));
   const [bulkOperation, setBulkOperation] = useState("");
 
-  const showFeedback = (message: string, saved = false) => {
+  const showFeedback = (message: string, variant?: "saved" | "error") => {
     let toast = document.getElementById("save-feedback");
     if (!toast) { toast = document.createElement("div"); toast.id = "save-feedback"; document.body.appendChild(toast); }
-    toast.className = `save-feedback${saved ? " saved" : ""}`;
+    toast.className = `save-feedback${variant ? ` ${variant}` : ""}`;
     toast.textContent = message;
   };
-  const finish = () => { showFeedback("Alteração salva ✓", true); window.setTimeout(() => document.getElementById("save-feedback")?.remove(), 2200); };
-  const runRowAction = async (action: ServerAction, formData: FormData) => { showFeedback("Salvando alteração..."); await action(formData); finish(); };
+  const finish = () => { showFeedback("Alteração salva ✓", "saved"); window.setTimeout(() => document.getElementById("save-feedback")?.remove(), 2200); };
+  const fail = (error: unknown) => { showFeedback(error instanceof Error ? error.message : "Não foi possível salvar.", "error"); window.setTimeout(() => document.getElementById("save-feedback")?.remove(), 5000); };
+  const runRowAction = async (action: ServerAction, formData: FormData) => { showFeedback("Salvando alteração..."); try { await action(formData); finish(); } catch (error) { fail(error); } };
   const shareAction = async (formData: FormData) => runRowAction(serverShareAction, formData);
   const itemAction = async (formData: FormData) => runRowAction(serverItemAction, formData);
   const projectedAction = async (formData: FormData) => runRowAction(serverProjectedAction, formData);
@@ -41,11 +42,13 @@ export function DueInvoiceEditor({ title, rows, projected, people, categories, b
       }
     }
     showFeedback("Salvando alterações...");
-    await serverBulkAction(formData);
-    const selected = new Set(formData.getAll("selected").map(String));
-    if (operation === "CATEGORY") { const value = String(formData.get("categoryId") ?? ""); setCategoryValues(current => ({ ...current, ...Object.fromEntries([...selected].map(id => [id, value])) })); }
-    if (operation === "PERSON") { const value = String(formData.get("personId") ?? ""); setPersonValues(current => ({ ...current, ...Object.fromEntries([...selected].map(id => [id, value])) })); }
-    finish();
+    try {
+      await serverBulkAction(formData);
+      const selected = new Set(formData.getAll("selected").map(String));
+      if (operation === "CATEGORY") { const value = String(formData.get("categoryId") ?? ""); setCategoryValues(current => ({ ...current, ...Object.fromEntries([...selected].map(id => [id, value])) })); }
+      if (operation === "PERSON") { const value = String(formData.get("personId") ?? ""); setPersonValues(current => ({ ...current, ...Object.fromEntries([...selected].map(id => [id, value])) })); }
+      finish();
+    } catch (error) { fail(error); }
   };
   const submitShareScope = (event: MouseEvent<HTMLButtonElement>, installment: boolean) => {
     const form = event.currentTarget.form; if (!form) return;
