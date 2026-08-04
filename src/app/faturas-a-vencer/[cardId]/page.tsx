@@ -17,8 +17,8 @@ export default async function DueInvoiceDetailPage({ params, searchParams }: { p
   const [year, month] = selected.split("-").map(Number);
   const [card, transactions, installments, people, categories] = await Promise.all([
     prisma.card.findUnique({ where: { id: cardId }, include: { bank: true } }),
-    prisma.transaction.findMany({ where: { cardId, billingYear: year, billingMonth: month, status: { not: "VOID" } }, include: { person: true, category: true, installment: true, installmentPlan: true, shares: { include: { person: true } } }, orderBy: { occurredAt: "asc" } }),
-    prisma.installment.findMany({ where: { plan: { cardId }, billingYear: year, billingMonth: month, status: { in: ["PROJECTED", "DIVERGENT"] } }, include: { plan: { include: { person: true, category: true } } }, orderBy: { sequence: "asc" } }),
+    prisma.transaction.findMany({ where: { cardId, billingYear: year, billingMonth: month, status: { not: "VOID" } }, include: { person: true, category: true, installment: true, installmentPlan: true, shares: { include: { person: true } } }, orderBy: [{ occurredAt: "asc" }, { id: "asc" }] }),
+    prisma.installment.findMany({ where: { plan: { cardId }, billingYear: year, billingMonth: month, status: { in: ["PROJECTED", "DIVERGENT"] } }, include: { plan: { include: { person: true, category: true } } }, orderBy: [{ sequence: "asc" }, { id: "asc" }] }),
     prisma.person.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" } }),
     prisma.category.findMany({ where: { active: true, parentId: { not: null } }, select: { id: true, name: true, parent: { select: { name: true } } }, orderBy: [{ parent: { name: "asc" } }, { name: "asc" }] }),
   ]);

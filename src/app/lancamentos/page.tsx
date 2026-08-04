@@ -29,7 +29,7 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
     ...(filters.busca ? { merchantNormalized: { contains: filters.busca.toUpperCase().replace(/[^A-Z0-9]/g, "") } } : {}),
   };
   const [transactions, editing] = await Promise.all([
-    prisma.transaction.findMany({ where, include: { card: true, person: true, category: true, shares: { include: { person: true } }, installment: true, installmentPlan: true }, orderBy: { occurredAt: "desc" }, take: 200 }),
+    prisma.transaction.findMany({ where, include: { card: true, person: true, category: true, shares: { include: { person: true } }, installment: true, installmentPlan: true }, orderBy: [{ occurredAt: "desc" }, { id: "asc" }], take: 200 }),
     filters.editar ? prisma.transaction.findUnique({ where: { id: filters.editar }, include: { installment: true, installmentPlan: true } }) : Promise.resolve(null),
   ]);
   const shiftMonth = (delta: number) => { const date = new Date(`${selectedMonth}-01T12:00:00`); date.setMonth(date.getMonth() + delta); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`; };
