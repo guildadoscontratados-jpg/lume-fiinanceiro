@@ -23,7 +23,7 @@ export function DueInvoiceEditor({ title, rows, projected, people, categories, b
     toast.className = `save-feedback${variant ? ` ${variant}` : ""}`;
     toast.textContent = message;
   };
-  const finish = () => { showFeedback("Alteração salva ✓", "saved"); window.setTimeout(() => document.getElementById("save-feedback")?.remove(), 2200); };
+  const finish = () => { showFeedback("Alteração salva ✓", "saved"); window.setTimeout(() => window.location.reload(), 700); };
   const fail = (error: unknown) => { showFeedback(error instanceof Error ? error.message : "Não foi possível salvar.", "error"); window.setTimeout(() => document.getElementById("save-feedback")?.remove(), 5000); };
   const runRowAction = async (action: ServerAction, formData: FormData) => { showFeedback("Salvando alteração..."); try { await action(formData); finish(); } catch (error) { fail(error); } };
   const shareAction = async (formData: FormData) => runRowAction(serverShareAction, formData);
