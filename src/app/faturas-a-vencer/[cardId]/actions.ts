@@ -129,7 +129,7 @@ export async function updateDueItemShares(cardId: string, formData: FormData) {
   if (count > 1 && shares.reduce((sum, item) => sum + item.percentageBps, 0) !== 10000) throw new Error("O rateio deve totalizar exatamente 100%.");
   if (count === 1) shares[0].percentageBps = 10000;
   await prisma.$transaction(async tx => {
-    const ids = count === 1 && scope === "ALL" && transaction.installmentPlanId
+    const ids = scope === "ALL" && transaction.installmentPlanId
       ? (await tx.transaction.findMany({ where: { installmentPlanId: transaction.installmentPlanId }, select: { id: true } })).map(item => item.id)
       : [transactionId];
     await tx.transactionShare.deleteMany({ where: { transactionId: { in: ids } } });
@@ -138,8 +138,8 @@ export async function updateDueItemShares(cardId: string, formData: FormData) {
       if (scope === "ALL" && transaction.installmentPlanId) await tx.installmentPlan.update({ where: { id: transaction.installmentPlanId }, data: { personId: shares[0].personId } });
     }
     else {
-      await tx.transaction.update({ where: { id: transactionId }, data: { personId: null } });
-      await tx.transactionShare.createMany({ data: shares.map(share => ({ transactionId, ...share })) });
+      await tx.transaction.updateMany({ where: { id: { in: ids } }, data: { personId: null } });
+      await tx.transactionShare.createMany({ data: ids.flatMap(id => shares.map(share => ({ transactionId: id, ...share }))) });
     }
   });
   revalidatePath(`/faturas-a-vencer/${cardId}`);
