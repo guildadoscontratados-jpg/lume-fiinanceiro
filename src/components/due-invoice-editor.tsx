@@ -2,7 +2,6 @@
 
 import { useState, type ChangeEvent, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
-import { useRouter } from "next/navigation";
 import { CategoryOptions, type SelectableCategory } from "./category-options";
 
 type Person = { id: string; name: string; nickname: string | null };
@@ -17,7 +16,6 @@ export function DueInvoiceEditor({ title, rows, projected, people, categories, b
   const [categoryValues, setCategoryValues] = useState<Record<string, string>>(() => Object.fromEntries(rows.map(row => [row.id, row.categoryId ?? ""])));
   const [extraPeople, setExtraPeople] = useState<Record<string, string>>(() => Object.fromEntries(rows.flatMap(row => row.shares.slice(1).map((share, index) => [`${row.id}-${index + 1}`, share.personId]))));
   const [bulkOperation, setBulkOperation] = useState("");
-  const router = useRouter();
 
   const showFeedback = (message: string, saved = false) => {
     let toast = document.getElementById("save-feedback");
@@ -26,7 +24,7 @@ export function DueInvoiceEditor({ title, rows, projected, people, categories, b
     toast.textContent = message;
   };
   const finish = () => { showFeedback("Alteração salva ✓", true); window.setTimeout(() => document.getElementById("save-feedback")?.remove(), 2200); };
-  const runRowAction = async (action: ServerAction, formData: FormData) => { showFeedback("Salvando alteração..."); await action(formData); router.refresh(); finish(); };
+  const runRowAction = async (action: ServerAction, formData: FormData) => { showFeedback("Salvando alteração..."); await action(formData); finish(); };
   const shareAction = async (formData: FormData) => runRowAction(serverShareAction, formData);
   const itemAction = async (formData: FormData) => runRowAction(serverItemAction, formData);
   const projectedAction = async (formData: FormData) => runRowAction(serverProjectedAction, formData);
@@ -44,7 +42,6 @@ export function DueInvoiceEditor({ title, rows, projected, people, categories, b
     }
     showFeedback("Salvando alterações...");
     await serverBulkAction(formData);
-    router.refresh();
     const selected = new Set(formData.getAll("selected").map(String));
     if (operation === "CATEGORY") { const value = String(formData.get("categoryId") ?? ""); setCategoryValues(current => ({ ...current, ...Object.fromEntries([...selected].map(id => [id, value])) })); }
     if (operation === "PERSON") { const value = String(formData.get("personId") ?? ""); setPersonValues(current => ({ ...current, ...Object.fromEntries([...selected].map(id => [id, value])) })); }
