@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ChangeEvent, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
 import { CategoryOptions, type SelectableCategory } from "./category-options";
 
@@ -16,6 +16,10 @@ export function DueInvoiceEditor({ title, rows, projected, people, categories, b
   const [categoryValues, setCategoryValues] = useState<Record<string, string>>(() => Object.fromEntries(rows.map(row => [row.id, row.categoryId ?? ""])));
   const [extraPeople, setExtraPeople] = useState<Record<string, string>>(() => Object.fromEntries(rows.flatMap(row => row.shares.slice(1).map((share, index) => [`${row.id}-${index + 1}`, share.personId]))));
   const [bulkOperation, setBulkOperation] = useState("");
+  const renderCount = useRef(0);
+  renderCount.current++;
+  if (typeof window !== "undefined") console.log(`[DueInvoiceEditor] render #${renderCount.current} rows=${rows.length} t=${Date.now()}`);
+  useEffect(() => { console.log(`[DueInvoiceEditor] MOUNTED t=${Date.now()}`); return () => console.log(`[DueInvoiceEditor] UNMOUNTED t=${Date.now()}`); }, []);
 
   const showFeedback = (message: string, variant?: "saved" | "error") => {
     let toast = document.getElementById("save-feedback");
