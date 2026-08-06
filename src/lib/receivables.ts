@@ -26,3 +26,16 @@ export function allocatedAmount(transaction: ReceivableTransaction, personId: st
   }
   return transaction.personId === personId ? transaction.amountCents : 0;
 }
+
+export type ReceivableInstallment = {
+  amountCents: number;
+  plan: { personId: string | null; shares: Array<{ personId: string; percentageBps: number }> };
+};
+
+export function allocatedInstallmentAmount(installment: ReceivableInstallment, personId: string) {
+  if (installment.plan.shares.length) {
+    const share = installment.plan.shares.find(item => item.personId === personId);
+    return share ? Math.round(installment.amountCents * share.percentageBps / 10000) : 0;
+  }
+  return installment.plan.personId === personId ? installment.amountCents : 0;
+}

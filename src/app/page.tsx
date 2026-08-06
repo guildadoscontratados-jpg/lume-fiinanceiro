@@ -2,7 +2,7 @@ import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
 import { formatCents } from "@/lib/money";
 import { prisma } from "@/lib/prisma";
-import { allocatedAmount, monthSelection, shiftMonth } from "@/lib/receivables";
+import { allocatedAmount, allocatedInstallmentAmount, monthSelection, shiftMonth } from "@/lib/receivables";
 
 export const dynamic = "force-dynamic";
 
@@ -14,7 +14,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
     prisma.invoice.findMany({ where: { referenceMonth: { gte: period.start, lt: period.end } }, include: { card: true, transactions: { where: { status: { not: "VOID" } }, select: { amountCents: true, personId: true, shares: true } } }, orderBy: { dueDate: "asc" } }),
     prisma.transaction.findMany({ where: { status: { not: "VOID" }, OR: [{ billingYear: period.year, billingMonth: period.month }, { billingYear: null, invoice: { referenceMonth: { gte: period.start, lt: period.end } } }, { billingYear: null, invoiceId: null, occurredAt: { gte: period.start, lt: period.end } }] }, include: { shares: true, category: true } }),
     prisma.payment.findMany({ where: { paidAt: { gte: period.start, lt: period.end }, ...(filters.personId ? { personId: filters.personId } : {}) } }),
-    prisma.installment.findMany({ where: { status: { in: ["PROJECTED", "DIVERGENT"] }, billingYear: period.year, billingMonth: period.month, ...(filters.personId ? { plan: { personId: filters.personId } } : {}) }, select: { amountCents: true } }),
+    prisma.installment.findMany({ where: { status: { in: ["PROJECTED", "DIVERGENT"] }, billingYear: period.year, billingMonth: period.month }, select: { amountCents: true, plan: { select: { personId: true, shares: true } } } }),
   ]);
   const visibleTransactions = filters.personId ? transactions.filter(item => allocatedAmount(item, filters.personId!) !== 0) : transactions;
   const itemValue = (item: typeof transactions[number]) => filters.personId ? allocatedAmount(item, filters.personId) : item.amountCents;
@@ -24,7 +24,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
   const categoryTotals = new Map<string, number>();
   for (const item of visibleTransactions) categoryTotals.set(item.category?.name || "Sem categoria", (categoryTotals.get(item.category?.name || "Sem categoria") ?? 0) + itemValue(item));
   const topCategories = [...categoryTotals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
-  const projectedTotal = projected.reduce((sum, item) => sum + item.amountCents, 0);
+  const projectedTotal = filters.personId ? projected.reduce((sum, item) => sum + allocatedInstallmentAmount(item, filters.personId!), 0) : projected.reduce((sum, item) => sum + item.amountCents, 0);
   const received = payments.reduce((sum, item) => sum + item.amountCents, 0);
   const monthLabel = period.start.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
   const monthUrl = (value: string) => `/?mes=${value}${filters.personId ? `&personId=${filters.personId}` : ""}`;

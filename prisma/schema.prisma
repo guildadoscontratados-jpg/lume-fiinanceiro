@@ -83,6 +83,7 @@ model Person {
   transactions Transaction[]
   shares       TransactionShare[]
   installmentPlans InstallmentPlan[]
+  installmentPlanShares InstallmentPlanShare[]
   payments     Payment[]
   merchantRules MerchantRule[]
 }
@@ -275,9 +276,21 @@ model InstallmentPlan {
   updatedAt   DateTime      @updatedAt
   transactions Transaction[]
   installments Installment[]
+  shares      InstallmentPlanShare[]
   card        Card          @relation(fields: [cardId], references: [id])
   person      Person?       @relation(fields: [personId], references: [id])
   category    Category?     @relation(fields: [categoryId], references: [id])
+}
+
+model InstallmentPlanShare {
+  id            String          @id @default(cuid())
+  planId        String
+  personId      String
+  percentageBps Int
+  plan          InstallmentPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  person        Person          @relation(fields: [personId], references: [id])
+
+  @@unique([planId, personId])
 }
 
 model Installment {
