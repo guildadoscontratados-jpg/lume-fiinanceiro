@@ -34,6 +34,17 @@ export async function createMerchantRule(formData: FormData) {
   revalidatePath("/categorias");
 }
 
+export async function createAutomationRule(pattern: string, categoryId: string) {
+  const normalized = pattern.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!normalized || !categoryId) return;
+  const existing = await prisma.merchantRule.findFirst({ where: { pattern: normalized, active: true } });
+  if (existing) return;
+  await prisma.merchantRule.create({ data: { pattern: normalized, categoryId, priority: 100 } });
+  revalidatePath("/categorias");
+  revalidatePath("/faturas-a-vencer");
+  revalidatePath("/importar");
+}
+
 export async function deleteMerchantRule(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (id) await prisma.merchantRule.delete({ where: { id } });
