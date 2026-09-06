@@ -7,7 +7,6 @@ import { mapRawImportRow, parseStatement } from "@/lib/import-parser";
 import { invoiceReferenceFromFileName } from "@/lib/invoice-period";
 import { billingPeriodFromReferenceMonth, calculateFirstBillingPeriod } from "@/lib/billing-period";
 import { createOrConfirmImportedTransaction } from "@/lib/installment-service";
-import { createAutomationRule } from "@/app/categorias/actions";
 import { prisma } from "@/lib/prisma";
 
 function parseImportPercentage(value: FormDataEntryValue | null) {
@@ -63,7 +62,6 @@ export async function confirmImport(batchId: string, formData: FormData) {
   const batch = await prisma.importBatch.findUnique({ where: { id: batchId }, include: { rows: true, invoice: true } });
   if (!batch || batch.status !== "REVIEW") throw new Error("Este lote não está disponível para confirmação.");
   const selected = new Set(formData.getAll("selected").map(String));
-  const pendingAutomations: Array<{ pattern: string; categoryId: string }> = [];
   await prisma.$transaction(
     async tx => {
       for (const row of batch.rows) {
@@ -105,10 +103,6 @@ export async function confirmImport(batchId: string, formData: FormData) {
         const personId = shares.length === 1 ? shares[0].personId : null;
         const categoryId = String(formData.get(`category-${row.id}`) ?? "") || null;
 
-        if (categoryId && String(formData.get(`create-automation-${row.id}`) ?? "") === "1") {
-          pendingAutomations.push({ pattern: description, categoryId });
-        }
-
         const transaction = await createOrConfirmImportedTransaction(tx, {
           cardId: batch.cardId,
           invoiceId: batch.invoiceId,
@@ -147,6 +141,5 @@ export async function confirmImport(batchId: string, formData: FormData) {
     },
   );
   if (batch.invoiceId) { const totals = await prisma.transaction.aggregate({ where: { invoiceId: batch.invoiceId, status: { not: "VOID" } }, _sum: { amountCents: true } }); await prisma.invoice.update({ where: { id: batch.invoiceId }, data: { totalCents: totals._sum.amountCents ?? 0 } }); }
-  for (const automation of pendingAutomations) { try { await createAutomationRule(automation.pattern, automation.categoryId); } catch { /* não bloqueia a confirmação da importação */ } }
   revalidatePath("/"); revalidatePath("/faturas"); revalidatePath("/lancamentos"); revalidatePath("/parcelamentos"); revalidatePath(`/importar/${batchId}`); redirect("/");
 }
