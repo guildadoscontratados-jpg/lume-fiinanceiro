@@ -147,6 +147,6 @@ export async function confirmImport(batchId: string, formData: FormData) {
     },
   );
   if (batch.invoiceId) { const totals = await prisma.transaction.aggregate({ where: { invoiceId: batch.invoiceId, status: { not: "VOID" } }, _sum: { amountCents: true } }); await prisma.invoice.update({ where: { id: batch.invoiceId }, data: { totalCents: totals._sum.amountCents ?? 0 } }); }
-  for (const automation of pendingAutomations) await createAutomationRule(automation.pattern, automation.categoryId);
+  for (const automation of pendingAutomations) { try { await createAutomationRule(automation.pattern, automation.categoryId); } catch { /* não bloqueia a confirmação da importação */ } }
   revalidatePath("/"); revalidatePath("/faturas"); revalidatePath("/lancamentos"); revalidatePath("/parcelamentos"); revalidatePath(`/importar/${batchId}`); redirect("/");
 }

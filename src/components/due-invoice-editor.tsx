@@ -77,7 +77,7 @@ export function DueInvoiceEditor({ title, rows, projected, people, categories, m
     if (!categoryId || !description || findMerchantRule(description, merchantRules)) return;
     const label = categoryLabel(categoryId);
     if (!label) return;
-    if (window.confirm(`Não existe automação para "${description}".\n\nDeseja cadastrar automação para que lançamentos parecidos sejam classificados como "${label}" automaticamente?`)) { try { await automationAction(description, categoryId); } catch { /* a categoria ainda é salva mesmo se a automação falhar */ } }
+    if (window.confirm(`Não existe automação para "${description}".\n\nDeseja cadastrar automação para que lançamentos parecidos sejam classificados como "${label}" automaticamente?`)) { try { await automationAction(description, categoryId); } catch (error) { window.alert(`Não foi possível cadastrar a automação: ${error instanceof Error ? error.message : String(error)}`); } }
   };
   const submitProjectedDueDate = (event: ChangeEvent<HTMLInputElement>) => {
     const form = event.currentTarget.form; if (!form) return;
