@@ -85,6 +85,22 @@ export async function bulkClassifyDueItems(cardId: string, formData: FormData) {
       prisma.transactionShare.deleteMany({ where: { transactionId: { in: validIds } } }),
       prisma.transaction.updateMany({ where: { id: { in: validIds } }, data: { personId } }),
     ]);
+  } else if (action === "SHARE") {
+    if (validInstallments.length) throw new Error("Parcelas previstas não podem receber rateio em massa.");
+    const count = Math.max(1, Math.trunc(Number(formData.get("shareCount") ?? 1)));
+    const shares = Array.from({ length: count }, (_, index) => ({ personId: String(formData.get(`sharePerson-${index}`) ?? ""), percentageBps: percentage(formData.get(`sharePercent-${index}`)) })).filter(item => item.personId);
+    if (shares.length !== count) throw new Error("Selecione uma pessoa em cada linha do rateio.");
+    if (new Set(shares.map(item => item.personId)).size !== shares.length) throw new Error("Não repita a mesma pessoa no rateio.");
+    if (count > 1 && shares.reduce((sum, item) => sum + item.percentageBps, 0) !== 10000) throw new Error("O rateio deve totalizar exatamente 100%.");
+    if (count === 1) shares[0].percentageBps = 10000;
+    await prisma.$transaction(async tx => {
+      await tx.transactionShare.deleteMany({ where: { transactionId: { in: validIds } } });
+      if (count === 1) await tx.transaction.updateMany({ where: { id: { in: validIds } }, data: { personId: shares[0].personId } });
+      else {
+        await tx.transaction.updateMany({ where: { id: { in: validIds } }, data: { personId: null } });
+        await tx.transactionShare.createMany({ data: validIds.flatMap(id => shares.map(share => ({ transactionId: id, ...share }))) });
+      }
+    });
   } else if (action === "DUE_MONTH") {
     const monthText = String(formData.get("dueMonth") ?? "");
     if (!/^(20\d{2})-(0[1-9]|1[0-2])$/.test(monthText)) throw new Error("Escolha o mês e o ano do vencimento.");
