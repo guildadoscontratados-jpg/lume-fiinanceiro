@@ -173,6 +173,70 @@ export async function updateDueItemField(cardId: string, formData: FormData) {
   revalidatePath("/previsoes");
 }
 
+async function deletePlanIfEmpty(tx: Prisma.TransactionClient, planId: string) {
+  const remaining = await tx.installment.count({ where: { planId } });
+  if (remaining === 0) await tx.installmentPlan.delete({ where: { id: planId } });
+}
+
+export async function deleteDueTransaction(cardId: string, formData: FormData) {
+  const transactionId = String(formData.get("transactionId") ?? "");
+  const transaction = await prisma.transaction.findFirst({ where: { id: transactionId, cardId }, include: { installment: true } });
+  if (!transaction) throw new Error("Lançamento não encontrado.");
+  await prisma.$transaction(async tx => {
+    if (transaction.installment) await tx.installment.delete({ where: { id: transaction.installment.id } });
+    await tx.transaction.delete({ where: { id: transactionId } });
+    if (transaction.installmentPlanId) await deletePlanIfEmpty(tx, transaction.installmentPlanId);
+  });
+  revalidatePath(`/faturas-a-vencer/${cardId}`);
+  revalidatePath("/faturas-a-vencer");
+  revalidatePath("/lancamentos");
+  revalidatePath("/parcelamentos");
+  revalidatePath("/previsoes");
+}
+
+export async function deleteDueInstallment(cardId: string, formData: FormData) {
+  const installmentId = String(formData.get("installmentId") ?? "");
+  const installment = await prisma.installment.findFirst({ where: { id: installmentId, plan: { cardId } } });
+  if (!installment) throw new Error("Parcela não encontrada.");
+  await prisma.$transaction(async tx => {
+    if (installment.transactionId) await tx.transaction.delete({ where: { id: installment.transactionId } });
+    else await tx.installment.delete({ where: { id: installmentId } });
+    await deletePlanIfEmpty(tx, installment.planId);
+  });
+  revalidatePath(`/faturas-a-vencer/${cardId}`);
+  revalidatePath("/faturas-a-vencer");
+  revalidatePath("/lancamentos");
+  revalidatePath("/parcelamentos");
+  revalidatePath("/previsoes");
+}
+
+export async function bulkDeleteDueItems(cardId: string, formData: FormData) {
+  const ids = [...new Set(formData.getAll("selected").map(String).filter(Boolean))];
+  const installmentIds = [...new Set(formData.getAll("selectedInstallments").map(String).filter(Boolean))];
+  if (!ids.length && !installmentIds.length) throw new Error("Selecione ao menos um lançamento.");
+  const validTransactions = await prisma.transaction.findMany({ where: { id: { in: ids }, cardId }, select: { id: true, installmentPlanId: true, installment: { select: { id: true } } } });
+  if (validTransactions.length !== ids.length) throw new Error("Há lançamentos inválidos na seleção.");
+  const validInstallments = await prisma.installment.findMany({ where: { id: { in: installmentIds }, plan: { cardId } }, select: { id: true, planId: true, transactionId: true } });
+  if (validInstallments.length !== installmentIds.length) throw new Error("Há parcelas inválidas na seleção.");
+  await prisma.$transaction(async tx => {
+    const planIds = new Set<string>();
+    const ownInstallmentIds = validTransactions.map(item => item.installment?.id).filter((value): value is string => !!value);
+    if (ownInstallmentIds.length) await tx.installment.deleteMany({ where: { id: { in: ownInstallmentIds } } });
+    if (ids.length) await tx.transaction.deleteMany({ where: { id: { in: ids } } });
+    for (const item of validTransactions) if (item.installmentPlanId) planIds.add(item.installmentPlanId);
+    const linkedTransactionIds = validInstallments.map(item => item.transactionId).filter((value): value is string => !!value);
+    if (linkedTransactionIds.length) await tx.transaction.deleteMany({ where: { id: { in: linkedTransactionIds } } });
+    if (installmentIds.length) await tx.installment.deleteMany({ where: { id: { in: installmentIds } } });
+    for (const item of validInstallments) planIds.add(item.planId);
+    for (const planId of planIds) await deletePlanIfEmpty(tx, planId);
+  });
+  revalidatePath(`/faturas-a-vencer/${cardId}`);
+  revalidatePath("/faturas-a-vencer");
+  revalidatePath("/lancamentos");
+  revalidatePath("/parcelamentos");
+  revalidatePath("/previsoes");
+}
+
 export async function updateProjectedDueDate(cardId: string, formData: FormData) {
   const installmentId = String(formData.get("installmentId") ?? "");
   const value = String(formData.get("value") ?? "");
