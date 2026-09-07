@@ -96,6 +96,63 @@ export async function updateTransaction(formData: FormData) {
   revalidatePath("/");
 }
 
+async function deleteInstallmentPlanIfEmpty(tx: Prisma.TransactionClient, planId: string) {
+  const remaining = await tx.installment.count({ where: { planId } });
+  if (remaining === 0) await tx.installmentPlan.delete({ where: { id: planId } });
+}
+
+async function performDeleteTransaction(id: string, scope: string) {
+  const current = await prisma.transaction.findUnique({ where: { id }, include: { installment: true } });
+  if (!current) throw new Error("Lançamento não encontrado.");
+  await prisma.$transaction(async tx => {
+    let transactionIds = [id];
+    let installmentIds = current.installment ? [current.installment.id] : [];
+    if (current.installmentPlanId && scope !== "ONLY_THIS") {
+      const currentSequence = current.installment?.sequence ?? 0;
+      const installments = await tx.installment.findMany({ where: { planId: current.installmentPlanId, ...(scope === "ALL" ? {} : { sequence: { gte: currentSequence } }) }, select: { id: true, transactionId: true } });
+      installmentIds = installments.map(item => item.id);
+      transactionIds = installments.map(item => item.transactionId).filter((value): value is string => !!value);
+    }
+    if (installmentIds.length) await tx.installment.deleteMany({ where: { id: { in: installmentIds } } });
+    if (transactionIds.length) await tx.transaction.deleteMany({ where: { id: { in: transactionIds } } });
+    if (current.installmentPlanId) await deleteInstallmentPlanIfEmpty(tx, current.installmentPlanId);
+  });
+  revalidatePath("/lancamentos");
+  revalidatePath("/previsoes");
+  revalidatePath("/parcelamentos");
+  revalidatePath("/faturas");
+  revalidatePath("/faturas-a-vencer");
+  revalidatePath("/");
+}
+
+export async function deleteTransaction(formData: FormData) {
+  const id = String(formData.get("id") ?? "");
+  const scope = String(formData.get("scope") ?? "ONLY_THIS");
+  await performDeleteTransaction(id, scope);
+}
+
+export async function deleteTransactionById(id: string) {
+  await performDeleteTransaction(id, "ONLY_THIS");
+}
+
+export async function bulkDeleteTransactions(formData: FormData) {
+  const ids = formData.getAll("selected").map(String).filter(Boolean);
+  if (!ids.length) throw new Error("Selecione ao menos um lançamento.");
+  await prisma.$transaction(async tx => {
+    const transactions = await tx.transaction.findMany({ where: { id: { in: ids } }, select: { installmentPlanId: true } });
+    const planIds = [...new Set(transactions.map(item => item.installmentPlanId).filter((value): value is string => !!value))];
+    await tx.installment.deleteMany({ where: { transactionId: { in: ids } } });
+    await tx.transaction.deleteMany({ where: { id: { in: ids } } });
+    for (const planId of planIds) await deleteInstallmentPlanIfEmpty(tx, planId);
+  });
+  revalidatePath("/lancamentos");
+  revalidatePath("/previsoes");
+  revalidatePath("/parcelamentos");
+  revalidatePath("/faturas");
+  revalidatePath("/faturas-a-vencer");
+  revalidatePath("/");
+}
+
 export async function bulkUpdateTransactions(formData: FormData) {
   const ids = formData.getAll("selected").map(String).filter(Boolean);
   if (!ids.length) throw new Error("Selecione ao menos um lançamento.");
