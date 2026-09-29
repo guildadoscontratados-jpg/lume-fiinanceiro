@@ -151,11 +151,19 @@ export async function updateDueItemShares(cardId: string, formData: FormData) {
     await tx.transactionShare.deleteMany({ where: { transactionId: { in: ids } } });
     if (count === 1) {
       await tx.transaction.updateMany({ where: { id: { in: ids } }, data: { personId: shares[0].personId } });
-      if (scope === "ALL" && transaction.installmentPlanId) await tx.installmentPlan.update({ where: { id: transaction.installmentPlanId }, data: { personId: shares[0].personId } });
+      if (scope === "ALL" && transaction.installmentPlanId) {
+        await tx.installmentPlanShare.deleteMany({ where: { planId: transaction.installmentPlanId } });
+        await tx.installmentPlan.update({ where: { id: transaction.installmentPlanId }, data: { personId: shares[0].personId } });
+      }
     }
     else {
       await tx.transaction.updateMany({ where: { id: { in: ids } }, data: { personId: null } });
       await tx.transactionShare.createMany({ data: ids.flatMap(id => shares.map(share => ({ transactionId: id, ...share }))) });
+      if (scope === "ALL" && transaction.installmentPlanId) {
+        await tx.installmentPlanShare.deleteMany({ where: { planId: transaction.installmentPlanId } });
+        await tx.installmentPlan.update({ where: { id: transaction.installmentPlanId }, data: { personId: null } });
+        await tx.installmentPlanShare.createMany({ data: shares.map(share => ({ planId: transaction.installmentPlanId!, ...share })) });
+      }
     }
   });
   revalidatePath(`/faturas-a-vencer/${cardId}`);
