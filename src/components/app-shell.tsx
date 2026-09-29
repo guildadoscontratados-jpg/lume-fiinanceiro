@@ -5,6 +5,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 
 const links = [
   ["/", "Dashboard"],
+  ["/relatorios", "Relatórios"],
   ["/receber", "A receber"],
   ["/faturas-a-vencer", "Faturas a vencer"],
   ["/pessoas", "Pessoas"],
