@@ -1,13 +1,13 @@
 import type { CategoryNature } from "@/generated/prisma-v9";
 
-export type CategoryMeta = { nature: CategoryNature; rootName: string };
+export type CategoryMeta = { nature: CategoryNature; rootId: string; rootName: string; name: string };
 
 export function buildCategoryMeta(categories: Array<{ id: string; name: string; parentId: string | null; nature: CategoryNature }>) {
   const byId = new Map(categories.map(category => [category.id, category]));
   const meta = new Map<string, CategoryMeta>();
   for (const category of categories) {
     const root = category.parentId ? byId.get(category.parentId) ?? category : category;
-    meta.set(category.id, { nature: category.nature, rootName: root.name });
+    meta.set(category.id, { nature: category.nature, rootId: root.id, rootName: root.name, name: category.name });
   }
   return meta;
 }
