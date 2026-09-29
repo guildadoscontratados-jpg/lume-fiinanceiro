@@ -4,7 +4,7 @@ import { formatCents } from "@/lib/money";
 import { prisma } from "@/lib/prisma";
 import { allocatedAmount, allocatedInstallmentAmount, monthSelection, shiftMonth } from "@/lib/receivables";
 import { buildCategoryMeta, lastMonths } from "@/lib/reports";
-import { CategoryBreakdownChart, MonthlyTrendChart, PersonBreakdownChart } from "@/components/reports-charts";
+import { CategoryBreakdownChart, CategoryMonthHeatmap, MonthlyTrendChart, PersonBreakdownChart, RankingList } from "@/components/reports-charts";
 
 export const dynamic = "force-dynamic";
 
@@ -24,11 +24,11 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
     prisma.person.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" } }),
     prisma.transaction.findMany({
       where: { status: { not: "VOID" }, OR: [...months.map(m => ({ billingYear: m.year, billingMonth: m.month })), { billingYear: null, invoice: { referenceMonth: { gte: rangeStart, lt: rangeEnd } } }, { billingYear: null, invoiceId: null, occurredAt: { gte: rangeStart, lt: rangeEnd } }] },
-      select: { amountCents: true, personId: true, categoryId: true, billingYear: true, billingMonth: true, occurredAt: true, shares: { select: { personId: true, percentageBps: true } }, invoice: { select: { referenceMonth: true } } },
+      select: { amountCents: true, personId: true, categoryId: true, billingYear: true, billingMonth: true, occurredAt: true, description: true, merchantNormalized: true, installmentPlanId: true, shares: { select: { personId: true, percentageBps: true } }, invoice: { select: { referenceMonth: true } } },
     }),
     prisma.installment.findMany({
       where: { status: { in: ["PROJECTED", "DIVERGENT"] }, OR: months.map(m => ({ billingYear: m.year, billingMonth: m.month })) },
-      select: { amountCents: true, billingYear: true, billingMonth: true, dueMonth: true, plan: { select: { categoryId: true, personId: true, shares: { select: { personId: true, percentageBps: true } } } } },
+      select: { amountCents: true, billingYear: true, billingMonth: true, dueMonth: true, plan: { select: { categoryId: true, personId: true, description: true, merchantNormalized: true, shares: { select: { personId: true, percentageBps: true } } } } },
     }),
   ]);
 
@@ -90,6 +90,51 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
     return { id: person.id, name: person.nickname || person.name, valueCents: confirmed + projected };
   }).filter(item => item.valueCents > 0).sort((a, b) => b.valueCents - a.valueCents);
 
+  const merchantTotals = new Map<string, { label: string; valueCents: number; count: number }>();
+  for (const t of selectedFamilyTx) {
+    const key = t.merchantNormalized || t.description;
+    const entry = merchantTotals.get(key) ?? { label: t.description, valueCents: 0, count: 0 };
+    entry.valueCents += txValue(t); entry.count += 1; merchantTotals.set(key, entry);
+  }
+  for (const i of selectedFamilyInst) {
+    const key = i.plan.merchantNormalized || i.plan.description;
+    const entry = merchantTotals.get(key) ?? { label: i.plan.description, valueCents: 0, count: 0 };
+    entry.valueCents += instValue(i); entry.count += 1; merchantTotals.set(key, entry);
+  }
+  const merchantRanking = [...merchantTotals.entries()].filter(([, m]) => m.valueCents > 0).sort((a, b) => b[1].valueCents - a[1].valueCents).slice(0, 10)
+    .map(([key, m]) => ({ id: key, label: m.label, valueCents: m.valueCents, meta: `${m.count}x` }));
+
+  const recentMonthKeys = new Set(months.slice(-2).map(m => m.key));
+  const recurringByMerchant = new Map<string, { label: string; months: Set<string>; totalCents: number; lastMonth: string }>();
+  for (const t of familyTx) {
+    if (t.installmentPlanId) continue;
+    const key = t.merchantNormalized || t.description;
+    const monthKey = txMonthKey(t);
+    const entry = recurringByMerchant.get(key) ?? { label: t.description, months: new Set<string>(), totalCents: 0, lastMonth: monthKey };
+    entry.months.add(monthKey);
+    entry.totalCents += txValue(t);
+    if (monthKey >= entry.lastMonth) { entry.lastMonth = monthKey; entry.label = t.description; }
+    recurringByMerchant.set(key, entry);
+  }
+  const recurringItems = [...recurringByMerchant.values()]
+    .filter(entry => entry.months.size >= 3 && [...entry.months].some(key => recentMonthKeys.has(key)))
+    .map(entry => ({ name: entry.label, monthsCount: entry.months.size, avgMonthlyCents: Math.round(entry.totalCents / entry.months.size) }))
+    .sort((a, b) => b.avgMonthlyCents - a.avgMonthlyCents);
+  const recurringMonthlyTotal = recurringItems.reduce((sum, item) => sum + item.avgMonthlyCents, 0);
+
+  const monthIndexByKey = new Map(months.map((m, index) => [m.key, index]));
+  const heatmapRows = new Map<string, number[]>();
+  const addToHeatmap = (name: string, key: string, value: number) => {
+    const index = monthIndexByKey.get(key);
+    if (index === undefined) return;
+    const values = heatmapRows.get(name) ?? new Array(months.length).fill(0);
+    values[index] += value;
+    heatmapRows.set(name, values);
+  };
+  for (const t of familyTx) addToHeatmap(nameOf(t.categoryId), txMonthKey(t), txValue(t));
+  for (const i of familyInst) addToHeatmap(nameOf(i.plan.categoryId), instMonthKey(i), instValue(i));
+  const heatmapData = [...heatmapRows.entries()].map(([name, values]) => ({ name, values, total: values.reduce((sum, v) => sum + v, 0) })).filter(row => row.total > 0).sort((a, b) => b.total - a.total);
+
   const uncategorizedTxCount = transactions.filter(t => txMonthKey(t) === selectedKey && !t.categoryId).length;
   const uncategorizedInstCount = installments.filter(i => instMonthKey(i) === selectedKey && !i.plan.categoryId).length;
 
@@ -121,5 +166,15 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
       <section className="panel"><div className="panel-heading"><div><p className="eyebrow">DISTRIBUIÇÃO</p><h2>{groupFilter ? `Subcategorias de ${groupFilterName}` : "Por categoria"} em {monthLabel}</h2></div></div>{categoryItems.length ? <CategoryBreakdownChart items={categoryItems} /> : <div className="empty-state compact"><strong>Sem despesas classificadas</strong><span>Nenhum gasto nesta competência com os filtros atuais.</span></div>}</section>
       {!personFilter && <section className="panel"><div className="panel-heading"><div><p className="eyebrow">POR PESSOA</p><h2>Quem gastou em {monthLabel}</h2></div></div>{personTotals.length ? <PersonBreakdownChart items={personTotals} /> : <div className="empty-state compact"><strong>Sem valores atribuídos</strong><span>Nenhuma pessoa com gasto nesta competência.</span></div>}</section>}
     </div>
+    <div className="dashboard-grid" style={{ marginTop: 18 }}>
+      <section className="panel"><div className="panel-heading"><div><p className="eyebrow">ONDE O DINHEIRO FOI</p><h2>Estabelecimentos em {monthLabel}</h2></div></div>{merchantRanking.length ? <RankingList items={merchantRanking} /> : <div className="empty-state compact"><strong>Sem lançamentos</strong><span>Nenhum estabelecimento nesta competência.</span></div>}</section>
+      <section className="panel"><div className="panel-heading"><div><p className="eyebrow">COMPROMISSOS FIXOS</p><h2>Assinaturas e gastos recorrentes</h2></div></div>
+        {recurringItems.length ? <>
+          <p className="reports-note"><strong>{formatCents(recurringMonthlyTotal)}/mês</strong> em compromissos fixos identificados — estimativa anual de {formatCents(recurringMonthlyTotal * 12)}.</p>
+          <div className="detail-table-wrap"><table className="detail-table recurring-table"><thead><tr><th>Estabelecimento</th><th>Meses ativos</th><th>Média mensal</th></tr></thead><tbody>{recurringItems.map(item => <tr key={item.name}><td>{item.name}</td><td>{item.monthsCount}/12</td><td>{formatCents(item.avgMonthlyCents)}</td></tr>)}</tbody></table></div>
+        </> : <div className="empty-state compact"><strong>Nada identificado ainda</strong><span>Precisa de pelo menos 3 dos últimos 12 meses com o mesmo estabelecimento (fora compras parceladas).</span></div>}
+      </section>
+    </div>
+    <section className="panel" style={{ marginTop: 18 }}><div className="panel-heading"><div><p className="eyebrow">SAZONALIDADE</p><h2>{groupFilter ? `Subcategorias de ${groupFilterName}` : "Categorias"} mês a mês</h2></div></div>{heatmapData.length ? <CategoryMonthHeatmap monthLabels={months.map(m => m.label)} rows={heatmapData} /> : <div className="empty-state compact"><strong>Sem dados</strong><span>Nenhum gasto nos últimos 12 meses com os filtros atuais.</span></div>}</section>
   </section></AppShell>;
 }

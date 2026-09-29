@@ -1,4 +1,4 @@
-import { formatCents } from "@/lib/money";
+import { formatCents, formatCentsCompact } from "@/lib/money";
 import { niceCeil } from "@/lib/reports";
 
 export const categoryColorCount = 7;
@@ -58,4 +58,32 @@ export function PersonBreakdownChart({ items }: { items: PersonItem[] }) {
       <b>{formatCents(item.valueCents)}</b>
     </article>;
   })}</div>;
+}
+
+type RankingItem = { id: string; label: string; valueCents: number; meta?: string };
+
+export function RankingList({ items }: { items: RankingItem[] }) {
+  const max = Math.max(...items.map(item => item.valueCents), 1);
+  return <div className="report-category-bars">{items.map(item => {
+    const width = Math.max(3, Math.round(item.valueCents / max * 100));
+    return <article key={item.id}>
+      <span><strong>{item.label}</strong>{item.meta && <small>{item.meta}</small>}</span>
+      <div className="report-bar-track"><div className="report-bar-fill" style={{ width: `${width}%`, background: "var(--accent)" }} /></div>
+      <b>{formatCents(item.valueCents)}</b>
+    </article>;
+  })}</div>;
+}
+
+type HeatmapRow = { name: string; values: number[] };
+
+export function CategoryMonthHeatmap({ monthLabels, rows }: { monthLabels: string[]; rows: HeatmapRow[] }) {
+  return <div className="detail-table-wrap"><table className="detail-table heatmap-table"><thead><tr><th>Categoria</th>{monthLabels.map((label, index) => <th key={index}>{label}</th>)}</tr></thead><tbody>
+    {rows.map(row => {
+      const rowMax = Math.max(...row.values, 1);
+      return <tr key={row.name}><td>{row.name}</td>{row.values.map((value, index) => {
+        const opacity = value > 0 ? 0.1 + (value / rowMax) * 0.32 : 0;
+        return <td className="heatmap-cell" key={index}><div className="heatmap-fill" style={{ opacity }} /><span className="heatmap-value">{formatCentsCompact(value)}</span></td>;
+      })}</tr>;
+    })}
+  </tbody></table></div>;
 }
