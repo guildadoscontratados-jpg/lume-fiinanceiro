@@ -36,6 +36,13 @@ enum TransactionType {
   REFUND
 }
 
+enum CategoryNature {
+  DESPESA_FAMILIAR
+  VALOR_A_RECEBER
+  MOVIMENTACAO_INTERNA
+  A_CLASSIFICAR
+}
+
 enum InstallmentStatus {
   PROJECTED
   CONFIRMED
@@ -172,10 +179,11 @@ model ImportRow {
 }
 
 model Category {
-  id        String     @id @default(cuid())
+  id        String         @id @default(cuid())
   name      String
   color     String?
-  active    Boolean    @default(true)
+  active    Boolean        @default(true)
+  nature    CategoryNature @default(A_CLASSIFICAR)
   parentId  String?
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt

@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma-v9";
+import { resolveCategoryNature } from "@/app/categorias/actions";
 
 function parsedDate(value: string) {
   const match = value.match(/^(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/);
@@ -55,7 +56,8 @@ export async function createDueCategory(cardId: string, formData: FormData) {
   const parentId = String(formData.get("parentId") ?? "").trim();
   if (!parentId) throw new Error("Escolha o grupo dessa subcategoria.");
   if (!await prisma.category.findFirst({ where: { id: parentId, parentId: null } })) throw new Error("Grupo inválido.");
-  await prisma.category.create({ data: { name, parentId, color: String(formData.get("color") ?? "").trim() || null } });
+  const nature = await resolveCategoryNature(parentId, "");
+  await prisma.category.create({ data: { name, parentId, nature, color: String(formData.get("color") ?? "").trim() || null } });
   revalidatePath(`/faturas-a-vencer/${cardId}`);
   revalidatePath("/categorias");
 }
