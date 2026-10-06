@@ -12,7 +12,7 @@ function monthKeyOf(year: number, month: number) {
   return `${year}-${String(month).padStart(2, "0")}`;
 }
 
-export default async function ReportsPage({ searchParams }: { searchParams: Promise<{ mes?: string; personId?: string; grupoId?: string }> }) {
+export default async function ReportsPage({ searchParams }: { searchParams: Promise<{ mes?: string; personId?: string; grupoId?: string; cat?: string; catMes?: string }> }) {
   const filters = await searchParams;
   const period = monthSelection(filters.mes);
   const months = lastMonths(period.year, period.month, 12);
@@ -24,11 +24,11 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
     prisma.person.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" } }),
     prisma.transaction.findMany({
       where: { status: { not: "VOID" }, OR: [...months.map(m => ({ billingYear: m.year, billingMonth: m.month })), { billingYear: null, invoice: { referenceMonth: { gte: rangeStart, lt: rangeEnd } } }, { billingYear: null, invoiceId: null, occurredAt: { gte: rangeStart, lt: rangeEnd } }] },
-      select: { amountCents: true, personId: true, categoryId: true, billingYear: true, billingMonth: true, occurredAt: true, description: true, merchantNormalized: true, installmentPlanId: true, shares: { select: { personId: true, percentageBps: true } }, invoice: { select: { referenceMonth: true } } },
+      select: { id: true, amountCents: true, personId: true, categoryId: true, billingYear: true, billingMonth: true, occurredAt: true, description: true, merchantNormalized: true, installmentPlanId: true, shares: { select: { personId: true, percentageBps: true } }, invoice: { select: { referenceMonth: true } } },
     }),
     prisma.installment.findMany({
       where: { status: { in: ["PROJECTED", "DIVERGENT"] }, OR: months.map(m => ({ billingYear: m.year, billingMonth: m.month })) },
-      select: { amountCents: true, billingYear: true, billingMonth: true, dueMonth: true, plan: { select: { categoryId: true, personId: true, description: true, merchantNormalized: true, shares: { select: { personId: true, percentageBps: true } } } } },
+      select: { id: true, sequence: true, amountCents: true, billingYear: true, billingMonth: true, dueMonth: true, plan: { select: { totalInstallments: true, categoryId: true, personId: true, description: true, merchantNormalized: true, shares: { select: { personId: true, percentageBps: true } } } } },
     }),
   ]);
 
@@ -123,17 +123,29 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
   const recurringMonthlyTotal = recurringItems.reduce((sum, item) => sum + item.avgMonthlyCents, 0);
 
   const monthIndexByKey = new Map(months.map((m, index) => [m.key, index]));
-  const heatmapRows = new Map<string, number[]>();
-  const addToHeatmap = (name: string, key: string, value: number) => {
+  const groupKeyOf = (categoryId: string | null) => (groupFilter ? categoryId : rootIdOf(categoryId)) ?? "none";
+  const heatmapRows = new Map<string, { name: string; values: number[] }>();
+  const addToHeatmap = (categoryId: string | null, key: string, value: number) => {
     const index = monthIndexByKey.get(key);
     if (index === undefined) return;
-    const values = heatmapRows.get(name) ?? new Array(months.length).fill(0);
-    values[index] += value;
-    heatmapRows.set(name, values);
+    const rowKey = groupKeyOf(categoryId);
+    const row = heatmapRows.get(rowKey) ?? { name: nameOf(categoryId), values: new Array(months.length).fill(0) };
+    row.values[index] += value;
+    heatmapRows.set(rowKey, row);
   };
-  for (const t of familyTx) addToHeatmap(nameOf(t.categoryId), txMonthKey(t), txValue(t));
-  for (const i of familyInst) addToHeatmap(nameOf(i.plan.categoryId), instMonthKey(i), instValue(i));
-  const heatmapData = [...heatmapRows.entries()].map(([name, values]) => ({ name, values, total: values.reduce((sum, v) => sum + v, 0) })).filter(row => row.total > 0).sort((a, b) => b.total - a.total);
+  for (const t of familyTx) addToHeatmap(t.categoryId, txMonthKey(t), txValue(t));
+  for (const i of familyInst) addToHeatmap(i.plan.categoryId, instMonthKey(i), instValue(i));
+  const heatmapData = [...heatmapRows.entries()].map(([key, row]) => ({ key, ...row, total: row.values.reduce((sum, v) => sum + v, 0) })).filter(row => row.total > 0).sort((a, b) => b.total - a.total);
+
+  const drillCat = filters.cat && heatmapRows.has(filters.cat) ? filters.cat : null;
+  const drillMonth = drillCat && filters.catMes && monthIndexByKey.has(filters.catMes) ? filters.catMes : null;
+  const personName = (id: string | null) => { const person = id ? people.find(p => p.id === id) : undefined; return person ? person.nickname || person.name : "—"; };
+  const drillItems = drillCat && drillMonth ? [
+    ...familyTx.filter(t => groupKeyOf(t.categoryId) === drillCat && txMonthKey(t) === drillMonth).map(t => ({ id: t.id, date: t.occurredAt.toLocaleDateString("pt-BR", { timeZone: "UTC" }), description: t.description, category: leafNameOf(t.categoryId), person: t.shares.length ? `Rateio (${t.shares.map(s => personName(s.personId)).join(", ")})` : personName(t.personId), status: "Confirmado", valueCents: txValue(t) })),
+    ...familyInst.filter(i => groupKeyOf(i.plan.categoryId) === drillCat && instMonthKey(i) === drillMonth).map(i => ({ id: i.id, date: "—", description: `${i.plan.description} (${i.sequence}/${i.plan.totalInstallments})`, category: leafNameOf(i.plan.categoryId), person: i.plan.shares.length ? `Rateio (${i.plan.shares.map(s => personName(s.personId)).join(", ")})` : personName(i.plan.personId), status: "Previsto", valueCents: instValue(i) })),
+  ].filter(item => item.valueCents !== 0).sort((a, b) => b.valueCents - a.valueCents) : [];
+  const drillTotal = drillItems.reduce((sum, item) => sum + item.valueCents, 0);
+  const drillLabel = drillMonth ? months.find(m => m.key === drillMonth)!.label : "";
 
   const uncategorizedTxCount = transactions.filter(t => txMonthKey(t) === selectedKey && !t.categoryId).length;
   const uncategorizedInstCount = installments.filter(i => instMonthKey(i) === selectedKey && !i.plan.categoryId).length;
@@ -146,6 +158,8 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
 
   const monthLabel = period.start.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
   const monthUrl = (value: string) => { const params = new URLSearchParams(); params.set("mes", value); if (personFilter) params.set("personId", personFilter); if (groupFilter) params.set("grupoId", groupFilter); return `/relatorios?${params.toString()}`; };
+  const cellHref = (rowKey: string, monthIndex: number) => { const params = new URLSearchParams(); params.set("mes", period.selected); if (personFilter) params.set("personId", personFilter); if (groupFilter) params.set("grupoId", groupFilter); params.set("cat", rowKey); params.set("catMes", months[monthIndex].key); return `/relatorios?${params.toString()}#detalhe-categoria`; };
+  const closeDrillHref = `${monthUrl(period.selected)}#mes-a-mes`;
   const scopeLabel = [personFilterName, groupFilterName].filter(Boolean).join(" · ");
 
   return <AppShell><section className="content"><header className="page-title"><div><p className="eyebrow">ANÁLISE FINANCEIRA</p><h1>Relatórios</h1><p className="intro">Somente despesas da família — compras para terceiros e movimentações internas ficam de fora.{scopeLabel && ` Filtrado por: ${scopeLabel}.`}</p></div></header>
@@ -175,6 +189,9 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
         </> : <div className="empty-state compact"><strong>Nada identificado ainda</strong><span>Precisa de pelo menos 3 dos últimos 12 meses com o mesmo estabelecimento (fora compras parceladas).</span></div>}
       </section>
     </div>
-    <section className="panel" style={{ marginTop: 18 }}><div className="panel-heading"><div><p className="eyebrow">SAZONALIDADE</p><h2>{groupFilter ? `Subcategorias de ${groupFilterName}` : "Categorias"} mês a mês</h2></div></div>{heatmapData.length ? <CategoryMonthHeatmap monthLabels={months.map(m => m.label)} rows={heatmapData} /> : <div className="empty-state compact"><strong>Sem dados</strong><span>Nenhum gasto nos últimos 12 meses com os filtros atuais.</span></div>}</section>
+    <section className="panel" id="mes-a-mes" style={{ marginTop: 18 }}><div className="panel-heading"><div><p className="eyebrow">SAZONALIDADE · CLIQUE NUM VALOR PARA VER OS GASTOS</p><h2>{groupFilter ? `Subcategorias de ${groupFilterName}` : "Categorias"} mês a mês</h2></div></div>{heatmapData.length ? <CategoryMonthHeatmap monthLabels={months.map(m => m.label)} rows={heatmapData} cellHref={cellHref} activeKey={drillCat} activeMonthIndex={drillMonth ? monthIndexByKey.get(drillMonth)! : null} /> : <div className="empty-state compact"><strong>Sem dados</strong><span>Nenhum gasto nos últimos 12 meses com os filtros atuais.</span></div>}</section>
+    {drillCat && drillMonth && <section className="panel" id="detalhe-categoria" style={{ marginTop: 18 }}><div className="panel-heading"><div><p className="eyebrow">DETALHE · {drillLabel.toUpperCase()}</p><h2>{heatmapRows.get(drillCat)!.name} — {formatCents(drillTotal)}</h2></div><Link className="secondary-link" href={closeDrillHref}>Fechar ✕</Link></div>
+      {drillItems.length ? <div className="detail-table-wrap"><table className="drill-table"><thead><tr><th>Data</th><th>Descrição</th><th>{groupFilter ? "Subcategoria" : "Categoria"}</th><th>Pessoa</th><th>Situação</th><th>Valor</th></tr></thead><tbody>{drillItems.map(item => <tr key={item.id}><td>{item.date}</td><td>{item.description}</td><td>{item.category}</td><td>{item.person}</td><td>{item.status}</td><td>{formatCents(item.valueCents)}</td></tr>)}</tbody></table></div> : <div className="empty-state compact"><strong>Sem gastos</strong><span>Nenhum lançamento nesta categoria no mês escolhido.</span></div>}
+    </section>}
   </section></AppShell>;
 }

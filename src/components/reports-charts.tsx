@@ -74,15 +74,17 @@ export function RankingList({ items }: { items: RankingItem[] }) {
   })}</div>;
 }
 
-type HeatmapRow = { name: string; values: number[] };
+type HeatmapRow = { key: string; name: string; values: number[] };
 
-export function CategoryMonthHeatmap({ monthLabels, rows }: { monthLabels: string[]; rows: HeatmapRow[] }) {
+export function CategoryMonthHeatmap({ monthLabels, rows, cellHref, activeKey, activeMonthIndex }: { monthLabels: string[]; rows: HeatmapRow[]; cellHref?: (rowKey: string, monthIndex: number) => string; activeKey?: string | null; activeMonthIndex?: number | null }) {
   return <div className="detail-table-wrap"><table className="detail-table heatmap-table"><thead><tr><th>Categoria</th>{monthLabels.map((label, index) => <th key={index}>{label}</th>)}</tr></thead><tbody>
     {rows.map(row => {
       const rowMax = Math.max(...row.values, 1);
-      return <tr key={row.name}><td>{row.name}</td>{row.values.map((value, index) => {
+      return <tr key={row.key}><td>{row.name}</td>{row.values.map((value, index) => {
         const opacity = value > 0 ? 0.1 + (value / rowMax) * 0.32 : 0;
-        return <td className="heatmap-cell" key={index}><div className="heatmap-fill" style={{ opacity }} /><span className="heatmap-value">{formatCentsCompact(value)}</span></td>;
+        const active = row.key === activeKey && index === activeMonthIndex;
+        const label = <span className="heatmap-value">{formatCentsCompact(value)}</span>;
+        return <td className={`heatmap-cell${active ? " active" : ""}`} key={index}><div className="heatmap-fill" style={{ opacity }} />{cellHref && value !== 0 ? <a className="heatmap-link" href={cellHref(row.key, index)} title={`Ver gastos de ${row.name} em ${monthLabels[index]}`}>{label}</a> : label}</td>;
       })}</tr>;
     })}
   </tbody></table></div>;
