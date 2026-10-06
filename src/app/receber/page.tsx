@@ -10,12 +10,12 @@ export const dynamic = "force-dynamic";
 export default async function ReceivablesPage({ searchParams }: { searchParams: Promise<{ mes?: string; personId?: string }> }) {
   const filters = await searchParams;
   const period = monthSelection(filters.mes);
-  const people = await prisma.person.findMany({ orderBy: { name: "asc" } });
+  const people = await prisma.person.findMany({ where: { isOwner: false }, orderBy: { name: "asc" } });
   const transactions = await prisma.transaction.findMany({
     where: { status: { not: "VOID" }, OR: [{ billingYear: period.year, billingMonth: period.month }, { billingYear: null, invoice: { referenceMonth: { gte: period.start, lt: period.end } } }, { billingYear: null, invoiceId: null, occurredAt: { gte: period.start, lt: period.end } }] },
     include: { shares: true, category: true, card: true }, orderBy: { occurredAt: "desc" },
   });
-  const payments = await prisma.payment.findMany({ where: { paidAt: { gte: period.start, lt: period.end } }, include: { person: true }, orderBy: { paidAt: "desc" } });
+  const payments = await prisma.payment.findMany({ where: { paidAt: { gte: period.start, lt: period.end }, person: { isOwner: false } }, include: { person: true }, orderBy: { paidAt: "desc" } });
   const projectedInstallments = await prisma.installment.findMany({ where: { billingYear: period.year, billingMonth: period.month, status: { in: ["PROJECTED", "DIVERGENT"] } }, include: { plan: { include: { person: true, category: true, shares: true } } }, orderBy: { sequence: "asc" } });
   const visiblePeople = filters.personId ? people.filter(person => person.id === filters.personId) : people;
   const rows = visiblePeople.map(person => {

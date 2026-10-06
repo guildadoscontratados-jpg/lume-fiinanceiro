@@ -19,7 +19,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
   const visibleTransactions = filters.personId ? transactions.filter(item => allocatedAmount(item, filters.personId!) !== 0) : transactions;
   const itemValue = (item: typeof transactions[number]) => filters.personId ? allocatedAmount(item, filters.personId) : item.amountCents;
   const total = visibleTransactions.reduce((sum, item) => sum + itemValue(item), 0);
-  const receivableByPerson = people.map(person => ({ person, value: transactions.reduce((sum, item) => sum + allocatedAmount(item, person.id), 0) - payments.filter(payment => payment.personId === person.id).reduce((sum, payment) => sum + payment.amountCents, 0) })).filter(item => item.value !== 0).sort((a, b) => b.value - a.value);
+  const receivableByPerson = people.filter(person => !person.isOwner).map(person => ({ person, value: transactions.reduce((sum, item) => sum + allocatedAmount(item, person.id), 0) - payments.filter(payment => payment.personId === person.id).reduce((sum, payment) => sum + payment.amountCents, 0) })).filter(item => item.value !== 0).sort((a, b) => b.value - a.value);
   const receivable = filters.personId ? receivableByPerson.find(item => item.person.id === filters.personId)?.value ?? 0 : receivableByPerson.reduce((sum, item) => sum + item.value, 0);
   const categoryTotals = new Map<string, number>();
   for (const item of visibleTransactions) categoryTotals.set(item.category?.name || "Sem categoria", (categoryTotals.get(item.category?.name || "Sem categoria") ?? 0) + itemValue(item));

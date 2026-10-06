@@ -7,8 +7,13 @@ import { prisma } from "@/lib/prisma";
 export async function createPerson(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   if (!name) throw new Error("O nome é obrigatório.");
-  await prisma.person.create({ data: { name, nickname: String(formData.get("nickname") ?? "").trim() || null, relationship: String(formData.get("relationship") ?? "").trim() || null, notes: String(formData.get("notes") ?? "").trim() || null } });
+  const isOwner = formData.get("isOwner") === "on";
+  await prisma.$transaction(async tx => {
+    if (isOwner) await tx.person.updateMany({ where: { isOwner: true }, data: { isOwner: false } });
+    await tx.person.create({ data: { name, isOwner, nickname: String(formData.get("nickname") ?? "").trim() || null, relationship: String(formData.get("relationship") ?? "").trim() || null, notes: String(formData.get("notes") ?? "").trim() || null } });
+  });
   revalidatePath("/pessoas");
+  revalidatePath("/receber");
   revalidatePath("/");
 }
 
@@ -16,8 +21,14 @@ export async function updatePerson(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   if (!id || !name) throw new Error("Nome e pessoa são obrigatórios.");
-  await prisma.person.update({ where: { id }, data: { name, nickname: String(formData.get("nickname") ?? "").trim() || null, relationship: String(formData.get("relationship") ?? "").trim() || null, notes: String(formData.get("notes") ?? "").trim() || null } });
+  const isOwner = formData.get("isOwner") === "on";
+  await prisma.$transaction(async tx => {
+    if (isOwner) await tx.person.updateMany({ where: { isOwner: true, id: { not: id } }, data: { isOwner: false } });
+    await tx.person.update({ where: { id }, data: { name, isOwner, nickname: String(formData.get("nickname") ?? "").trim() || null, relationship: String(formData.get("relationship") ?? "").trim() || null, notes: String(formData.get("notes") ?? "").trim() || null } });
+  });
   revalidatePath("/pessoas");
+  revalidatePath("/receber");
+  revalidatePath("/");
   revalidatePath("/faturas-a-vencer");
   revalidatePath("/lancamentos");
   redirect("/pessoas");
