@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma-v9";
 import { resolveCategoryNature } from "@/app/categorias/actions";
+import { expenseKeyOf } from "@/lib/expense-kind";
 
 function parsedDate(value: string) {
   const match = value.match(/^(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/);
@@ -103,6 +104,17 @@ export async function bulkClassifyDueItems(cardId: string, formData: FormData) {
         await tx.transactionShare.createMany({ data: validIds.flatMap(id => shares.map(share => ({ transactionId: id, ...share }))) });
       }
     });
+  } else if (action === "EXPENSE_KIND") {
+    const kind = String(formData.get("expenseKind") ?? "");
+    if (kind !== "FIXA" && kind !== "VARIAVEL") throw new Error("Escolha fixa ou variável.");
+    const [selectedTx, selectedInst] = await Promise.all([
+      prisma.transaction.findMany({ where: { id: { in: validIds } }, select: { merchantNormalized: true, description: true } }),
+      prisma.installment.findMany({ where: { id: { in: validInstallments.map(item => item.id) } }, select: { plan: { select: { merchantNormalized: true, description: true } } } }),
+    ]);
+    const merchants = new Map([...selectedTx, ...selectedInst.map(item => item.plan)].map(item => [expenseKeyOf(item.merchantNormalized, item.description), item.description]));
+    merchants.delete("");
+    await prisma.$transaction([...merchants].map(([merchantKey, label]) => prisma.merchantExpenseKind.upsert({ where: { merchantKey }, update: { kind, label }, create: { merchantKey, label, kind } })));
+    revalidatePath("/relatorios");
   } else if (action === "DUE_MONTH") {
     const monthText = String(formData.get("dueMonth") ?? "");
     if (!/^(20\d{2})-(0[1-9]|1[0-2])$/.test(monthText)) throw new Error("Escolha o mês e o ano do vencimento.");
