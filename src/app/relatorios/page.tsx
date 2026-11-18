@@ -5,6 +5,8 @@ import { prisma } from "@/lib/prisma";
 import { allocatedAmount, allocatedInstallmentAmount, monthSelection, shiftMonth } from "@/lib/receivables";
 import { buildCategoryMeta, lastMonths } from "@/lib/reports";
 import { CategoryBreakdownChart, CategoryMonthHeatmap, MonthlyTrendChart, PersonBreakdownChart, RankingList } from "@/components/reports-charts";
+import { expenseKeyOf, expenseKindResolver } from "@/lib/expense-kind";
+import { setMerchantExpenseKindFromForm } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -12,14 +14,14 @@ function monthKeyOf(year: number, month: number) {
   return `${year}-${String(month).padStart(2, "0")}`;
 }
 
-export default async function ReportsPage({ searchParams }: { searchParams: Promise<{ mes?: string; personId?: string; grupoId?: string; cat?: string; catMes?: string }> }) {
+export default async function ReportsPage({ searchParams }: { searchParams: Promise<{ mes?: string; personId?: string; grupoId?: string; tipo?: string; cat?: string; catMes?: string }> }) {
   const filters = await searchParams;
   const period = monthSelection(filters.mes);
   const months = lastMonths(period.year, period.month, 12);
   const rangeStart = new Date(Date.UTC(months[0].year, months[0].month - 1, 1));
   const rangeEnd = new Date(Date.UTC(period.year, period.month, 1));
 
-  const [categories, people, transactions, installments] = await Promise.all([
+  const [categories, people, transactions, installments, expenseKinds] = await Promise.all([
     prisma.category.findMany({ select: { id: true, name: true, parentId: true, nature: true } }),
     prisma.person.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" } }),
     prisma.transaction.findMany({
@@ -30,6 +32,7 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
       where: { status: { in: ["PROJECTED", "DIVERGENT"] }, OR: months.map(m => ({ billingYear: m.year, billingMonth: m.month })) },
       select: { id: true, sequence: true, amountCents: true, billingYear: true, billingMonth: true, dueMonth: true, plan: { select: { totalInstallments: true, categoryId: true, personId: true, description: true, merchantNormalized: true, shares: { select: { personId: true, percentageBps: true } } } } },
     }),
+    prisma.merchantExpenseKind.findMany({ select: { merchantKey: true, kind: true } }),
   ]);
 
   const categoryMeta = buildCategoryMeta(categories);
@@ -54,10 +57,43 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
     return monthKeyOf(i.dueMonth.getUTCFullYear(), i.dueMonth.getUTCMonth() + 1);
   };
 
-  const familyTx = transactions.filter(t => natureOf(t.categoryId) === "DESPESA_FAMILIAR" && (!groupFilter || rootIdOf(t.categoryId) === groupFilter));
-  const familyInst = installments.filter(i => natureOf(i.plan.categoryId) === "DESPESA_FAMILIAR" && (!groupFilter || rootIdOf(i.plan.categoryId) === groupFilter));
+  const kindOf = expenseKindResolver(expenseKinds);
+  const txKind = (t: (typeof transactions)[number]) => kindOf(t.merchantNormalized, t.description);
+  const instKind = (i: (typeof installments)[number]) => kindOf(i.plan.merchantNormalized, i.plan.description);
+  const kindFilter = filters.tipo === "FIXA" || filters.tipo === "VARIAVEL" ? filters.tipo : null;
+  const kindFilterName = kindFilter === "FIXA" ? "Despesas fixas" : kindFilter === "VARIAVEL" ? "Despesas variáveis" : null;
+
+  const scopedTx = transactions.filter(t => natureOf(t.categoryId) === "DESPESA_FAMILIAR" && (!groupFilter || rootIdOf(t.categoryId) === groupFilter));
+  const scopedInst = installments.filter(i => natureOf(i.plan.categoryId) === "DESPESA_FAMILIAR" && (!groupFilter || rootIdOf(i.plan.categoryId) === groupFilter));
+  const familyTx = kindFilter ? scopedTx.filter(t => txKind(t) === kindFilter) : scopedTx;
+  const familyInst = kindFilter ? scopedInst.filter(i => instKind(i) === kindFilter) : scopedInst;
   const txValue = (t: (typeof transactions)[number]) => personFilter ? allocatedAmount(t, personFilter) : t.amountCents;
   const instValue = (i: (typeof installments)[number]) => personFilter ? allocatedInstallmentAmount(i, personFilter) : i.amountCents;
+
+  const kindSplit = { FIXA: 0, VARIAVEL: 0 };
+  const fixedByMerchant = new Map<string, { label: string; valueCents: number; count: number }>();
+  const fixedMonthly = new Map(months.map(m => [m.key, 0]));
+  for (const t of scopedTx) {
+    const kind = txKind(t);
+    const monthKey = txMonthKey(t);
+    if (kind === "FIXA" && fixedMonthly.has(monthKey)) fixedMonthly.set(monthKey, fixedMonthly.get(monthKey)! + txValue(t));
+    if (monthKey !== period.selected) continue;
+    kindSplit[kind] += txValue(t);
+    if (kind === "FIXA") { const key = expenseKeyOf(t.merchantNormalized, t.description); const entry = fixedByMerchant.get(key) ?? { label: t.description, valueCents: 0, count: 0 }; entry.valueCents += txValue(t); entry.count += 1; fixedByMerchant.set(key, entry); }
+  }
+  for (const i of scopedInst) {
+    const kind = instKind(i);
+    const monthKey = instMonthKey(i);
+    if (kind === "FIXA" && fixedMonthly.has(monthKey)) fixedMonthly.set(monthKey, fixedMonthly.get(monthKey)! + instValue(i));
+    if (monthKey !== period.selected) continue;
+    kindSplit[kind] += instValue(i);
+    if (kind === "FIXA") { const key = expenseKeyOf(i.plan.merchantNormalized, i.plan.description); const entry = fixedByMerchant.get(key) ?? { label: i.plan.description, valueCents: 0, count: 0 }; entry.valueCents += instValue(i); entry.count += 1; fixedByMerchant.set(key, entry); }
+  }
+  const kindSplitTotal = kindSplit.FIXA + kindSplit.VARIAVEL;
+  const kindPct = (value: number) => kindSplitTotal ? Math.round(value / kindSplitTotal * 1000) / 10 : 0;
+  const fixedItems = [...fixedByMerchant.entries()].map(([key, entry]) => ({ key, ...entry })).sort((a, b) => b.valueCents - a.valueCents);
+  const fixedMonthsWithData = [...fixedMonthly.values()].filter(value => value > 0);
+  const fixedAverageCents = fixedMonthsWithData.length ? Math.round(fixedMonthsWithData.reduce((sum, value) => sum + value, 0) / fixedMonthsWithData.length) : 0;
 
   const monthly = new Map(months.map(m => [m.key, { confirmedCents: 0, projectedCents: 0 }]));
   for (const t of familyTx) { const bucket = monthly.get(txMonthKey(t)); if (bucket) bucket.confirmedCents += txValue(t); }
@@ -116,9 +152,9 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
     if (monthKey >= entry.lastMonth) { entry.lastMonth = monthKey; entry.label = t.description; }
     recurringByMerchant.set(key, entry);
   }
-  const recurringItems = [...recurringByMerchant.values()]
+  const recurringItems = [...recurringByMerchant.entries()].map(([key, entry]) => ({ key, ...entry }))
     .filter(entry => entry.months.size >= 3 && [...entry.months].some(key => recentMonthKeys.has(key)))
-    .map(entry => ({ name: entry.label, monthsCount: entry.months.size, avgMonthlyCents: Math.round(entry.totalCents / entry.months.size) }))
+    .map(entry => ({ key: entry.key, name: entry.label, monthsCount: entry.months.size, avgMonthlyCents: Math.round(entry.totalCents / entry.months.size), fixed: kindOf(entry.key, entry.label) === "FIXA" }))
     .sort((a, b) => b.avgMonthlyCents - a.avgMonthlyCents);
   const recurringMonthlyTotal = recurringItems.reduce((sum, item) => sum + item.avgMonthlyCents, 0);
 
@@ -160,14 +196,15 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
   const dailyAverageCents = Math.round(selectedTotals.confirmedCents / Math.max(1, daysElapsed));
 
   const monthLabel = period.start.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
-  const monthUrl = (value: string) => { const params = new URLSearchParams(); params.set("mes", value); if (personFilter) params.set("personId", personFilter); if (groupFilter) params.set("grupoId", groupFilter); return `/relatorios?${params.toString()}`; };
-  const cellHref = (rowKey: string, monthIndex: number) => { const params = new URLSearchParams(); params.set("mes", period.selected); if (personFilter) params.set("personId", personFilter); if (groupFilter) params.set("grupoId", groupFilter); params.set("cat", rowKey); params.set("catMes", months[monthIndex].key); return `/relatorios?${params.toString()}#detalhe-categoria`; };
+  const monthUrl = (value: string) => { const params = new URLSearchParams(); params.set("mes", value); if (personFilter) params.set("personId", personFilter); if (groupFilter) params.set("grupoId", groupFilter); if (kindFilter) params.set("tipo", kindFilter); return `/relatorios?${params.toString()}`; };
+  const cellHref = (rowKey: string, monthIndex: number) => { const params = new URLSearchParams(); params.set("mes", period.selected); if (personFilter) params.set("personId", personFilter); if (groupFilter) params.set("grupoId", groupFilter); if (kindFilter) params.set("tipo", kindFilter); params.set("cat", rowKey); params.set("catMes", months[monthIndex].key); return `/relatorios?${params.toString()}#detalhe-categoria`; };
+  const kindUrl = (kind: "FIXA" | "VARIAVEL") => { const params = new URLSearchParams(); params.set("mes", period.selected); if (personFilter) params.set("personId", personFilter); if (groupFilter) params.set("grupoId", groupFilter); params.set("tipo", kind); return `/relatorios?${params.toString()}`; };
   const closeDrillHref = `${monthUrl(period.selected)}#mes-a-mes`;
-  const scopeLabel = [personFilterName, groupFilterName].filter(Boolean).join(" · ");
+  const scopeLabel = [kindFilterName, personFilterName, groupFilterName].filter(Boolean).join(" · ");
 
   return <AppShell><section className="content"><header className="page-title"><div><p className="eyebrow">ANÁLISE FINANCEIRA</p><h1>Relatórios</h1><p className="intro">Somente despesas da família — compras para terceiros e movimentações internas ficam de fora.{scopeLabel && ` Filtrado por: ${scopeLabel}.`}</p></div></header>
     <section className="month-switcher panel"><Link href={monthUrl(shiftMonth(period.selected, -1))}>‹</Link><div><span>COMPETÊNCIA</span><strong>{monthLabel}</strong><small>Últimos 12 meses no gráfico de evolução</small></div><Link href={monthUrl(shiftMonth(period.selected, 1))}>›</Link></section>
-    <form className="panel dashboard-filter"><input type="hidden" name="mes" value={period.selected} /><label>Pessoa<select name="personId" defaultValue={personFilter ?? ""}><option value="">Todas as pessoas</option>{people.map(person => <option key={person.id} value={person.id}>{person.nickname || person.name}</option>)}</select></label><label>Grupo de categoria<select name="grupoId" defaultValue={groupFilter ?? ""}><option value="">Todos os grupos</option>{familyGroups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label><button className="secondary-button" type="submit">Aplicar filtro</button>{(personFilter || groupFilter) && <Link className="secondary-link" href="/relatorios">Limpar filtros</Link>}</form>
+    <form className="panel dashboard-filter"><input type="hidden" name="mes" value={period.selected} /><label>Pessoa<select name="personId" defaultValue={personFilter ?? ""}><option value="">Todas as pessoas</option>{people.map(person => <option key={person.id} value={person.id}>{person.nickname || person.name}</option>)}</select></label><label>Grupo de categoria<select name="grupoId" defaultValue={groupFilter ?? ""}><option value="">Todos os grupos</option>{familyGroups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label><label>Tipo de despesa<select name="tipo" defaultValue={kindFilter ?? ""}><option value="">Fixas e variáveis</option><option value="FIXA">Somente fixas</option><option value="VARIAVEL">Somente variáveis</option></select></label><button className="secondary-button" type="submit">Aplicar filtro</button>{(personFilter || groupFilter || kindFilter) && <Link className="secondary-link" href="/relatorios">Limpar filtros</Link>}</form>
     {(uncategorizedTxCount > 0 || uncategorizedInstCount > 0) && <p className="reports-note">
       {uncategorizedTxCount > 0 && <><strong>{uncategorizedTxCount} lançamento(s)</strong> sem categoria nesta competência não entram nos gráficos. <Link href={`/lancamentos?mes=${period.selected}&categoryId=__none__`}>Classificar agora →</Link></>}
       {uncategorizedInstCount > 0 && <>{uncategorizedTxCount > 0 ? " · " : ""}<strong>{uncategorizedInstCount} parcela(s) prevista(s)</strong> sem categoria — ajuste pela aba Faturas a vencer, editando a categoria de uma parcela já confirmada desse parcelamento com a opção &quot;todas as parcelas&quot;.</>}
@@ -178,6 +215,15 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
       <article className="summary-card"><p>{groupFilter ? "Maior subcategoria" : "Maior categoria"}</p><strong>{categoryItems[0]?.name ?? "—"}</strong><span>{categoryItems[0] ? formatCents(categoryItems[0].valueCents) : "Sem dados"}</span></article>
       <article className="summary-card"><p>Média diária</p><strong>{formatCents(dailyAverageCents)}</strong><span>{isCurrentRealMonth ? `Nos ${daysElapsed} dia(s) já passados` : `Ao longo de ${daysInMonth} dia(s)`}</span></article>
     </div>
+    <section className="panel" id="fixas-variaveis" style={{ marginBottom: 18 }}><div className="panel-heading"><div><p className="eyebrow">FIXAS × VARIÁVEIS</p><h2>Natureza do gasto em {monthLabel}</h2></div></div>
+      <div className="drill-subtotals">
+        <article><span>Despesas fixas</span><strong>{formatCents(kindSplit.FIXA)}</strong><small>{kindPct(kindSplit.FIXA).toLocaleString("pt-BR")}% do mês · <Link href={kindUrl("FIXA")}>ver relatório</Link></small></article>
+        <article><span>Despesas variáveis</span><strong>{formatCents(kindSplit.VARIAVEL)}</strong><small>{kindPct(kindSplit.VARIAVEL).toLocaleString("pt-BR")}% do mês · <Link href={kindUrl("VARIAVEL")}>ver relatório</Link></small></article>
+        <article><span>Média mensal das fixas</span><strong>{formatCents(fixedAverageCents)}</strong><small>Nos {fixedMonthsWithData.length} mês(es) com fixas, dos últimos 12</small></article>
+      </div>
+      {fixedItems.length ? <div className="detail-table-wrap" style={{ marginTop: 14 }}><table className="detail-table recurring-table"><thead><tr><th>Despesa fixa</th><th>Lançamentos</th><th>Valor no mês</th><th></th></tr></thead><tbody>{fixedItems.map(item => <tr key={item.key}><td>{item.label}</td><td>{item.count}</td><td>{formatCents(item.valueCents)}</td><td><form action={setMerchantExpenseKindFromForm}><input type="hidden" name="merchantKey" value={item.key} /><input type="hidden" name="label" value={item.label} /><input type="hidden" name="kind" value="VARIAVEL" /><button className="secondary-button" type="submit">Tornar variável</button></form></td></tr>)}</tbody></table></div>
+        : <p className="reports-note" style={{ marginTop: 14 }}>Nenhuma despesa marcada como fixa neste mês. Marque pela coluna <strong>Tipo</strong> no detalhe da fatura (Faturas a vencer) ou pelo botão em &quot;Assinaturas e gastos recorrentes&quot; abaixo — a marcação vale para todos os lançamentos do mesmo estabelecimento.</p>}
+    </section>
     <section className="panel"><div className="panel-heading"><div><p className="eyebrow">EVOLUÇÃO</p><h2>Gasto {scopeLabel ? `(${scopeLabel})` : "da família"} — últimos 12 meses</h2></div></div><MonthlyTrendChart points={trendPoints} /></section>
     <div className="dashboard-grid" style={{ marginTop: 18, ...(personFilter ? { gridTemplateColumns: "1fr" } : {}) }}>
       <section className="panel"><div className="panel-heading"><div><p className="eyebrow">DISTRIBUIÇÃO</p><h2>{groupFilter ? `Subcategorias de ${groupFilterName}` : "Por categoria"} em {monthLabel}</h2></div></div>{categoryItems.length ? <CategoryBreakdownChart items={categoryItems} /> : <div className="empty-state compact"><strong>Sem despesas classificadas</strong><span>Nenhum gasto nesta competência com os filtros atuais.</span></div>}</section>
@@ -188,7 +234,7 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
       <section className="panel"><div className="panel-heading"><div><p className="eyebrow">COMPROMISSOS FIXOS</p><h2>Assinaturas e gastos recorrentes</h2></div></div>
         {recurringItems.length ? <>
           <p className="reports-note"><strong>{formatCents(recurringMonthlyTotal)}/mês</strong> em compromissos fixos identificados — estimativa anual de {formatCents(recurringMonthlyTotal * 12)}.</p>
-          <div className="detail-table-wrap"><table className="detail-table recurring-table"><thead><tr><th>Estabelecimento</th><th>Meses ativos</th><th>Média mensal</th></tr></thead><tbody>{recurringItems.map(item => <tr key={item.name}><td>{item.name}</td><td>{item.monthsCount}/12</td><td>{formatCents(item.avgMonthlyCents)}</td></tr>)}</tbody></table></div>
+          <div className="detail-table-wrap"><table className="detail-table recurring-table"><thead><tr><th>Estabelecimento</th><th>Meses ativos</th><th>Média mensal</th><th>Tipo</th></tr></thead><tbody>{recurringItems.map(item => <tr key={item.key}><td>{item.name}</td><td>{item.monthsCount}/12</td><td>{formatCents(item.avgMonthlyCents)}</td><td>{item.fixed ? "Fixa" : <form action={setMerchantExpenseKindFromForm}><input type="hidden" name="merchantKey" value={item.key} /><input type="hidden" name="label" value={item.name} /><input type="hidden" name="kind" value="FIXA" /><button className="secondary-button" type="submit">Marcar como fixa</button></form>}</td></tr>)}</tbody></table></div>
         </> : <div className="empty-state compact"><strong>Nada identificado ainda</strong><span>Precisa de pelo menos 3 dos últimos 12 meses com o mesmo estabelecimento (fora compras parceladas).</span></div>}
       </section>
     </div>
