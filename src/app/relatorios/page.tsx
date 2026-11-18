@@ -140,24 +140,6 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
   const merchantRanking = [...merchantTotals.entries()].filter(([, m]) => m.valueCents > 0).sort((a, b) => b[1].valueCents - a[1].valueCents).slice(0, 10)
     .map(([key, m]) => ({ id: key, label: m.label, valueCents: m.valueCents, meta: `${m.count}x` }));
 
-  const recentMonthKeys = new Set(months.slice(-2).map(m => m.key));
-  const recurringByMerchant = new Map<string, { label: string; months: Set<string>; totalCents: number; lastMonth: string }>();
-  for (const t of familyTx) {
-    if (t.installmentPlanId) continue;
-    const key = t.merchantNormalized || t.description;
-    const monthKey = txMonthKey(t);
-    const entry = recurringByMerchant.get(key) ?? { label: t.description, months: new Set<string>(), totalCents: 0, lastMonth: monthKey };
-    entry.months.add(monthKey);
-    entry.totalCents += txValue(t);
-    if (monthKey >= entry.lastMonth) { entry.lastMonth = monthKey; entry.label = t.description; }
-    recurringByMerchant.set(key, entry);
-  }
-  const recurringItems = [...recurringByMerchant.entries()].map(([key, entry]) => ({ key, ...entry }))
-    .filter(entry => entry.months.size >= 3 && [...entry.months].some(key => recentMonthKeys.has(key)))
-    .map(entry => ({ key: entry.key, name: entry.label, monthsCount: entry.months.size, avgMonthlyCents: Math.round(entry.totalCents / entry.months.size), fixed: kindOf(entry.key, entry.label) === "FIXA" }))
-    .sort((a, b) => b.avgMonthlyCents - a.avgMonthlyCents);
-  const recurringMonthlyTotal = recurringItems.reduce((sum, item) => sum + item.avgMonthlyCents, 0);
-
   const monthIndexByKey = new Map(months.map((m, index) => [m.key, index]));
   const groupKeyOf = (categoryId: string | null) => (groupFilter ? categoryId : rootIdOf(categoryId)) ?? "none";
   const heatmapRows = new Map<string, { name: string; values: number[] }>();
@@ -222,22 +204,14 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
         <article><span>Média mensal das fixas</span><strong>{formatCents(fixedAverageCents)}</strong><small>Nos {fixedMonthsWithData.length} mês(es) com fixas, dos últimos 12</small></article>
       </div>
       {fixedItems.length ? <div className="detail-table-wrap" style={{ marginTop: 14 }}><table className="detail-table recurring-table"><thead><tr><th>Despesa fixa</th><th>Lançamentos</th><th>Valor no mês</th><th></th></tr></thead><tbody>{fixedItems.map(item => <tr key={item.key}><td>{item.label}</td><td>{item.count}</td><td>{formatCents(item.valueCents)}</td><td><form action={setMerchantExpenseKindFromForm}><input type="hidden" name="merchantKey" value={item.key} /><input type="hidden" name="label" value={item.label} /><input type="hidden" name="kind" value="VARIAVEL" /><button className="secondary-button" type="submit">Tornar variável</button></form></td></tr>)}</tbody></table></div>
-        : <p className="reports-note" style={{ marginTop: 14 }}>Nenhuma despesa marcada como fixa neste mês. Marque pela coluna <strong>Tipo</strong> no detalhe da fatura (Faturas a vencer) ou pelo botão em &quot;Assinaturas e gastos recorrentes&quot; abaixo — a marcação vale para todos os lançamentos do mesmo estabelecimento.</p>}
+        : <p className="reports-note" style={{ marginTop: 14 }}>Nenhuma despesa marcada como fixa neste mês. Marque pela coluna <strong>Tipo</strong> no detalhe da fatura (Faturas a vencer) — a marcação vale para todos os lançamentos do mesmo estabelecimento.</p>}
     </section>
     <section className="panel"><div className="panel-heading"><div><p className="eyebrow">EVOLUÇÃO</p><h2>Gasto {scopeLabel ? `(${scopeLabel})` : "da família"} — últimos 12 meses</h2></div></div><MonthlyTrendChart points={trendPoints} /></section>
     <div className="dashboard-grid" style={{ marginTop: 18, ...(personFilter ? { gridTemplateColumns: "1fr" } : {}) }}>
       <section className="panel"><div className="panel-heading"><div><p className="eyebrow">DISTRIBUIÇÃO</p><h2>{groupFilter ? `Subcategorias de ${groupFilterName}` : "Por categoria"} em {monthLabel}</h2></div></div>{categoryItems.length ? <CategoryBreakdownChart items={categoryItems} /> : <div className="empty-state compact"><strong>Sem despesas classificadas</strong><span>Nenhum gasto nesta competência com os filtros atuais.</span></div>}</section>
       {!personFilter && <section className="panel"><div className="panel-heading"><div><p className="eyebrow">POR PESSOA</p><h2>Quem gastou em {monthLabel}</h2></div></div>{personTotals.length ? <PersonBreakdownChart items={personTotals} /> : <div className="empty-state compact"><strong>Sem valores atribuídos</strong><span>Nenhuma pessoa com gasto nesta competência.</span></div>}</section>}
     </div>
-    <div className="dashboard-grid" style={{ marginTop: 18 }}>
-      <section className="panel"><div className="panel-heading"><div><p className="eyebrow">ONDE O DINHEIRO FOI</p><h2>Estabelecimentos em {monthLabel}</h2></div></div>{merchantRanking.length ? <RankingList items={merchantRanking} /> : <div className="empty-state compact"><strong>Sem lançamentos</strong><span>Nenhum estabelecimento nesta competência.</span></div>}</section>
-      <section className="panel"><div className="panel-heading"><div><p className="eyebrow">COMPROMISSOS FIXOS</p><h2>Assinaturas e gastos recorrentes</h2></div></div>
-        {recurringItems.length ? <>
-          <p className="reports-note"><strong>{formatCents(recurringMonthlyTotal)}/mês</strong> em compromissos fixos identificados — estimativa anual de {formatCents(recurringMonthlyTotal * 12)}.</p>
-          <div className="detail-table-wrap"><table className="detail-table recurring-table"><thead><tr><th>Estabelecimento</th><th>Meses ativos</th><th>Média mensal</th><th>Tipo</th></tr></thead><tbody>{recurringItems.map(item => <tr key={item.key}><td>{item.name}</td><td>{item.monthsCount}/12</td><td>{formatCents(item.avgMonthlyCents)}</td><td>{item.fixed ? "Fixa" : <form action={setMerchantExpenseKindFromForm}><input type="hidden" name="merchantKey" value={item.key} /><input type="hidden" name="label" value={item.name} /><input type="hidden" name="kind" value="FIXA" /><button className="secondary-button" type="submit">Marcar como fixa</button></form>}</td></tr>)}</tbody></table></div>
-        </> : <div className="empty-state compact"><strong>Nada identificado ainda</strong><span>Precisa de pelo menos 3 dos últimos 12 meses com o mesmo estabelecimento (fora compras parceladas).</span></div>}
-      </section>
-    </div>
+    <section className="panel" style={{ marginTop: 18 }}><div className="panel-heading"><div><p className="eyebrow">ONDE O DINHEIRO FOI</p><h2>Estabelecimentos em {monthLabel}</h2></div></div>{merchantRanking.length ? <RankingList items={merchantRanking} /> : <div className="empty-state compact"><strong>Sem lançamentos</strong><span>Nenhum estabelecimento nesta competência.</span></div>}</section>
     <section className="panel" id="mes-a-mes" style={{ marginTop: 18 }}><div className="panel-heading"><div><p className="eyebrow">SAZONALIDADE · CLIQUE NUM VALOR PARA VER OS GASTOS</p><h2>{groupFilter ? `Subcategorias de ${groupFilterName}` : "Categorias"} mês a mês</h2></div></div>{heatmapData.length ? <CategoryMonthHeatmap monthLabels={months.map(m => m.label)} rows={heatmapData} cellHref={cellHref} activeKey={drillCat} activeMonthIndex={drillMonth ? monthIndexByKey.get(drillMonth)! : null} /> : <div className="empty-state compact"><strong>Sem dados</strong><span>Nenhum gasto nos últimos 12 meses com os filtros atuais.</span></div>}</section>
     {drillCat && drillMonth && <section className="panel" id="detalhe-categoria" style={{ marginTop: 18 }}><div className="panel-heading"><div><p className="eyebrow">DETALHE · {drillLabel.toUpperCase()}</p><h2>{heatmapRows.get(drillCat)!.name} — {formatCents(drillTotal)}</h2></div><Link className="secondary-link" href={closeDrillHref}>Fechar ✕</Link></div>
       {drillSubtotals.length > 0 && <div className="drill-subtotals">{drillSubtotals.map(item => <article key={item.name}><span>{item.name}</span><strong>{formatCents(item.valueCents)}</strong><small>{item.pct.toLocaleString("pt-BR")}% · {item.count} lançamento(s)</small></article>)}</div>}
